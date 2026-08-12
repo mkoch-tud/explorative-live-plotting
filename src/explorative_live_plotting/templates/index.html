@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Explorative Live Plotting</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header><h1>Explorative Live Plotting</h1><span id="status">Loading…</span></header>
+  <main>
+    <aside>
+      <fieldset><legend>Lazy data sources</legend>
+        <label>Name<input id="source-name" placeholder="measurements"></label>
+        <label>Path or glob<input id="source-path" placeholder="/data/*.parquet"></label>
+        <label>Format<select id="source-format"><option>auto</option><option>csv</option><option>parquet</option><option>ndjson</option><option>ipc</option></select></label>
+        <label>Reader options (JSON)<textarea id="source-options">{}</textarea></label>
+        <button id="add-source">Add source</button><div id="sources"></div>
+      </fieldset>
+      <fieldset><legend>Plot layers</legend><div id="layers"></div><button id="add-layer">Add layer</button></fieldset>
+      <fieldset><legend>Axes and figure</legend>
+        <div class="grid"><label>Width [in]<input id="width" type="number" value="8" step=".1"></label><label>Height [in]<input id="height" type="number" value="4.5" step=".1"></label></div>
+        <div class="grid"><label>X label<input id="xlabel"></label><label>Y label<input id="ylabel"></label></div>
+        <label>Secondary Y label<input id="secondary-ylabel"></label>
+        <div class="grid"><label>X scale<select id="xscale"><option>linear</option><option>log</option><option>symlog</option><option>logit</option></select></label><label>Y scale<select id="yscale"><option>linear</option><option>log</option><option>symlog</option><option>logit</option></select></label></div>
+        <div class="grid"><label>X min<input id="xmin" type="number" step="any"></label><label>X max<input id="xmax" type="number" step="any"></label><label>Y min<input id="ymin" type="number" step="any"></label><label>Y max<input id="ymax" type="number" step="any"></label></div>
+        <label>Custom x ticks<input id="xticks" placeholder="1, 500, 1000"></label><label>Custom tick labels<input id="xtick-labels" placeholder="one, five hundred, thousand"></label>
+        <div class="grid"><label>Tick rotation<input id="rotation" type="number" value="0"></label><label>Horizontal<select id="tick-ha"><option>center</option><option>left</option><option>right</option></select></label><label>Vertical<select id="tick-va"><option>top</option><option>center</option><option>bottom</option><option>baseline</option></select></label></div>
+        <div class="checks"><label><input id="major-x" type="checkbox" checked> Major x ticks</label><label><input id="minor-x" type="checkbox"> Minor x ticks</label><label><input id="x-grid" type="checkbox"> X grid</label><label><input id="y-grid" type="checkbox" checked> Y grid</label><label><input id="secondary-grid" type="checkbox"> Secondary Y grid</label><label><input id="legend" type="checkbox" checked> Legend</label><label><input id="mono" type="checkbox"> Mono font</label></div>
+      </fieldset>
+      <fieldset><legend>Annotations</legend><textarea id="annotations">[]</textarea><small>JSON array: vline, hline, vspan, hspan, or text.</small></fieldset>
+      <fieldset><legend>Export</legend><label>Filename<input id="filename" value="explorative-plot"></label><div class="checks"><label><input id="png" type="checkbox" checked> PNG</label><label><input id="pdf" type="checkbox" checked> PDF</label><label><input id="json" type="checkbox" checked> JSON config</label></div><input id="load-config" type="file" accept="application/json"><button id="clear-cache">Clear cache</button></fieldset>
+      <div class="actions"><button id="render" class="primary">Render</button><button id="save">Save</button><button id="download">Download</button></div>
+    </aside>
+    <section id="output"><div id="message">Add a source and layer, then render.</div><div id="previews"></div></section>
+  </main>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
+
