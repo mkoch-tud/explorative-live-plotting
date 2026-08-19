@@ -13,6 +13,7 @@ from flask import Flask, Response, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 
 from .cache import QueryCache
+from .codegen import generate_script
 from .data import DataCatalog, SourceSpec
 from .errors import ConfigurationError
 from .logging import log
@@ -82,6 +83,13 @@ def _source_spec(raw: Any) -> SourceSpec:
     options = raw.get("options") or {}
     if not isinstance(options, dict):
         raise ConfigurationError("source options must be an object")
+    options = dict(options)
+    separator = raw.get("separator")
+    if separator is not None and str(separator) != "":
+        separator = str(separator)
+        if separator == r"\t":
+            separator = "\t"
+        options["separator"] = separator
     return SourceSpec(
         name=str(raw.get("name", "")).strip(),
         path=str(raw.get("path", "")).strip(),
@@ -115,10 +123,30 @@ def create_app(state: ApplicationState) -> Flask:
             {
                 "sources": state.catalog.all_metadata(),
                 "registry": state.registry.metadata(),
-                "default_config": default_config(),
+                "config_module": state.catalog.config_module,
+                "default_config": default_config(state.catalog.config_module),
                 "output_dir": str(state.output_dir),
             }
         )
+
+    @app.post("/api/config-module")
+    def set_config_module():
+        raw = request.get_json(silent=False)
+        if not isinstance(raw, dict):
+            raise ConfigurationError("config module request must be an object")
+        module = str(raw.get("module") or "").strip() or None
+        raw_sources = raw.get("sources")
+        with state.render_lock:
+            if raw_sources is not None:
+                if not isinstance(raw_sources, list):
+                    raise ConfigurationError("sources must be an array")
+                sources = state.catalog.replace_sources(
+                    [_source_spec(item) for item in raw_sources], module
+                )
+            else:
+                sources = state.catalog.set_config_module(module)
+        log(f"Config module set to: {module or '(none)'}")
+        return jsonify({"config_module": module, "sources": sources})
 
     @app.post("/api/sources")
     def add_source():
@@ -137,16 +165,24 @@ def create_app(state: ApplicationState) -> Flask:
         frame = state.catalog.lazy(name).head(rows).collect(engine="streaming")
         return jsonify({"columns": frame.columns, "rows": frame.to_dicts()})
 
+    def request_config() -> dict[str, Any]:
+        config = validate_config(request.get_json(silent=False), state.registry)
+        if config["config_module"] != state.catalog.config_module:
+            raise ConfigurationError(
+                "configuration module has not been applied; apply it before rendering or exporting"
+            )
+        return config
+
     @app.post("/api/validate")
     def validate():
-        config = validate_config(request.get_json(silent=False), state.registry)
+        config = request_config()
         for layer in config["layers"]:
             if layer.get("enabled", True):
                 state.engine.execute(layer)
         return jsonify(config)
 
     def render(formats: list[str] | None = None):
-        config = validate_config(request.get_json(silent=False), state.registry)
+        config = request_config()
         with state.render_lock:
             return config, render_artifacts(config, state.engine, state.registry, formats)
 
@@ -159,6 +195,18 @@ def create_app(state: ApplicationState) -> Flask:
     def download():
         config, (artifacts, _) = render()
         return _download(artifacts, config["filename"])
+
+    @app.post("/api/export-code")
+    def export_code():
+        config = request_config()
+        with state.render_lock:
+            script = generate_script(config, state.catalog, state.registry)
+        return send_file(
+            BytesIO(script.encode()),
+            as_attachment=True,
+            download_name=f"{config['filename']}.py",
+            mimetype="text/x-python",
+        )
 
     @app.post("/api/save")
     def save():

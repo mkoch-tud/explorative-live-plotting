@@ -40,6 +40,10 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Load a Python plugin defining register(registry); repeat as needed.",
     )
+    parser.add_argument(
+        "--config-module",
+        help="Import portable source-path variables from a dotted Python module.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("plots"))
     parser.add_argument("--cache-dir", type=Path, default=Path(".elp-cache"))
     parser.add_argument("--memory-cache-entries", type=int, default=16)
@@ -58,7 +62,9 @@ def main() -> int:
     for path in args.plugin:
         load_plugin(path, registry)
         log(f"Loaded plugin: {path.resolve()}")
-    catalog = DataCatalog()
+    catalog = DataCatalog(args.config_module)
+    if args.config_module:
+        log(f"Loaded config module: {args.config_module}")
     for spec in args.source:
         metadata = catalog.add(spec)
         log(f"Registered lazy source {metadata['name']}: {metadata['path']}")

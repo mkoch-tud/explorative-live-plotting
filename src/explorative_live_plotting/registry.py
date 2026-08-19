@@ -15,6 +15,33 @@ from .errors import ConfigurationError
 
 AggregationFactory = Callable[[str | None, dict[str, Any]], pl.Expr]
 PlotRenderer = Callable[["PlotContext"], None]
+BUILTIN_AGGREGATIONS = {
+    "none",
+    "sum",
+    "min",
+    "max",
+    "mean",
+    "median",
+    "std",
+    "var",
+    "first",
+    "last",
+    "count",
+    "n_unique",
+    "quantile",
+}
+BUILTIN_PLOTS = {
+    "line",
+    "step",
+    "scatter",
+    "bar",
+    "area",
+    "histogram",
+    "box",
+    "violin",
+    "stem",
+    "hexbin",
+}
 
 
 @dataclass

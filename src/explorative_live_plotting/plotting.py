@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import polars as pl
@@ -16,6 +17,9 @@ import polars as pl
 from .errors import ConfigurationError
 from .query import QueryEngine
 from .registry import PlotContext, Registry
+
+mpl.rcParams["pdf.fonttype"] = 42
+mpl.rcParams["ps.fonttype"] = 42
 
 SAFE_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 DEFAULT_STYLE = {
@@ -27,9 +31,10 @@ DEFAULT_STYLE = {
 }
 
 
-def default_config() -> dict[str, Any]:
+def default_config(config_module: str | None = None) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "config_module": config_module,
         "filename": "explorative-plot",
         "sources": [],
         "figure": {"width": 8.0, "height": 4.5, "dpi": 150, "font_family": "default"},
@@ -67,6 +72,9 @@ def default_config() -> dict[str, Any]:
 def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ConfigurationError("configuration must be an object")
+    schema_version = raw.get("schema_version", 1)
+    if schema_version not in {1, 2}:
+        raise ConfigurationError(f"unsupported configuration schema version: {schema_version}")
     config = default_config()
     for section in ("figure", "axes", "legend"):
         if section in raw:
@@ -76,10 +84,22 @@ def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
     config.update(
         {
             key: raw[key]
-            for key in ("filename", "sources", "layers", "annotations", "export_formats")
+            for key in (
+                "config_module",
+                "filename",
+                "sources",
+                "layers",
+                "annotations",
+                "export_formats",
+            )
             if key in raw
         }
     )
+    config["schema_version"] = 2
+    module = config.get("config_module")
+    if module is not None and not isinstance(module, str):
+        raise ConfigurationError("config_module must be a string or null")
+    config["config_module"] = str(module or "").strip() or None
     if SAFE_FILENAME.fullmatch(str(config["filename"])) is None:
         raise ConfigurationError("filename must be a safe basename")
     figure = config["figure"]

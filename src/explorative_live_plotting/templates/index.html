@@ -11,9 +11,12 @@
   <main>
     <aside>
       <fieldset><legend>Lazy data sources</legend>
+        <label>Config module<input id="config-module" placeholder="ipv6_ndpi.config"></label>
+        <button id="apply-config-module">Apply config module</button>
         <label>Name<input id="source-name" placeholder="measurements"></label>
-        <label>Path or glob<input id="source-path" placeholder="/data/*.parquet"></label>
+        <label>Path or glob<input id="source-path" placeholder="${DATA_PATH}/measurements/*.parquet"></label>
         <label>Format<select id="source-format"><option>auto</option><option>csv</option><option>parquet</option><option>ndjson</option><option>ipc</option></select></label>
+        <label>CSV separator<input id="source-separator" maxlength="2" placeholder=", or ; or \t"></label>
         <label>Reader options (JSON)<textarea id="source-options">{}</textarea></label>
         <button id="add-source">Add source</button><div id="sources"></div>
       </fieldset>
@@ -29,7 +32,7 @@
         <div class="checks"><label><input id="major-x" type="checkbox" checked> Major x ticks</label><label><input id="minor-x" type="checkbox"> Minor x ticks</label><label><input id="x-grid" type="checkbox"> X grid</label><label><input id="y-grid" type="checkbox" checked> Y grid</label><label><input id="secondary-grid" type="checkbox"> Secondary Y grid</label><label><input id="legend" type="checkbox" checked> Legend</label><label><input id="mono" type="checkbox"> Mono font</label></div>
       </fieldset>
       <fieldset><legend>Annotations</legend><textarea id="annotations">[]</textarea><small>JSON array: vline, hline, vspan, hspan, or text.</small></fieldset>
-      <fieldset><legend>Export</legend><label>Filename<input id="filename" value="explorative-plot"></label><div class="checks"><label><input id="png" type="checkbox" checked> PNG</label><label><input id="pdf" type="checkbox" checked> PDF</label><label><input id="json" type="checkbox" checked> JSON config</label></div><input id="load-config" type="file" accept="application/json"><button id="clear-cache">Clear cache</button></fieldset>
+      <fieldset><legend>Export</legend><label>Filename<input id="filename" value="explorative-plot"></label><div class="checks"><label><input id="png" type="checkbox" checked> PNG</label><label><input id="pdf" type="checkbox" checked> PDF</label><label><input id="json" type="checkbox" checked> JSON config</label></div><input id="load-config" type="file" accept="application/json"><button id="export-code">Export code</button><button id="clear-cache">Clear cache</button></fieldset>
       <div class="actions"><button id="render" class="primary">Render</button><button id="save">Save</button><button id="download">Download</button></div>
     </aside>
     <section id="output"><div id="message">Add a source and layer, then render.</div><div id="previews"></div></section>
@@ -37,4 +40,3 @@
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>
-

@@ -76,7 +76,7 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
         raise ConfigurationError("each plot layer must be an object")
     source = raw.get("source")
     spec = catalog.get(source)
-    schema = catalog.lazy(spec).collect_schema()
+    schema = catalog.schema(spec.name)
     plot_type = raw.get("plot_type", "line")
     aggregation = raw.get("aggregation", "none")
     x_column = raw.get("x_column") or None
@@ -152,7 +152,7 @@ class QueryEngine:
 
     def _lazy_query(self, layer: dict[str, Any]) -> pl.LazyFrame:
         lazy = self.catalog.lazy(layer["source"])
-        schema = lazy.collect_schema()
+        schema = self.catalog.schema(layer["source"])
         expressions = [_filter_expression(item, schema) for item in layer["filters"]]
         if expressions:
             combined = (
