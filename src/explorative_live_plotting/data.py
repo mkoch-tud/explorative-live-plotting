@@ -213,6 +213,103 @@ class DataCatalog:
             module_name = self._config_module_name
         return self._resolve_path(value, module, module_name)
 
+    def path_variables(self) -> list[dict[str, str]]:
+        """Return public string/path values exposed by the active config module."""
+        with self._lock:
+            module = self._config_module
+        if module is None:
+            return []
+        return [
+            {
+                "name": name,
+                "placeholder": f"${{{name}}}",
+                "value": os.fspath(value),
+            }
+            for name, value in sorted(vars(module).items())
+            if not name.startswith("_") and isinstance(value, (str, os.PathLike))
+        ]
+
+    def complete_path(self, value: str, limit: int = 50) -> dict[str, Any]:
+        """Resolve a path template and suggest matching variables and filesystem entries."""
+        raw = str(value)
+        variables = self.path_variables()
+        variable_start = raw.rfind("${")
+        bare_dollar = raw.endswith("$") and variable_start < 0
+        if bare_dollar or (variable_start >= 0 and "}" not in raw[variable_start:]):
+            if bare_dollar:
+                variable_start = len(raw) - 1
+                prefix = ""
+            else:
+                prefix = raw[variable_start + 2 :]
+            suggestions = [
+                {
+                    "value": (
+                        raw[:variable_start]
+                        + item["placeholder"]
+                        + ("/" if Path(item["value"]).expanduser().is_dir() else "")
+                    ),
+                    "label": f"{item['placeholder']} → {item['value']}",
+                    "kind": "variable",
+                }
+                for item in variables
+                if item["name"].startswith(prefix)
+            ]
+            return {
+                "resolved_path": None,
+                "suggestions": suggestions[:limit],
+                "variables": variables,
+            }
+
+        try:
+            resolved = self.resolve_path(raw)
+        except ConfigurationError as error:
+            return {
+                "resolved_path": None,
+                "suggestions": [],
+                "variables": variables,
+                "error": str(error),
+            }
+
+        suggestions: list[dict[str, str]] = []
+        if raw and not glob.has_magic(resolved):
+            path = Path(resolved)
+            if path.is_file():
+                pass
+            elif path.is_dir() and not raw.endswith(("/", os.sep)):
+                suggestions.append(
+                    {
+                        "value": f"{raw}/",
+                        "label": f"{path.name}/",
+                        "kind": "directory",
+                    }
+                )
+            else:
+                raw_separator = raw.rfind("/")
+                raw_directory = raw[: raw_separator + 1] if raw_separator >= 0 else ""
+                parent = path if raw.endswith(("/", os.sep)) else path.parent
+                prefix = "" if raw.endswith(("/", os.sep)) else path.name
+                try:
+                    matches = sorted(
+                        (item for item in parent.iterdir() if item.name.startswith(prefix)),
+                        key=lambda item: (not item.is_dir(), item.name.casefold()),
+                    )
+                except OSError:
+                    matches = []
+                for item in matches[:limit]:
+                    suffix = "/" if item.is_dir() else ""
+                    suggestions.append(
+                        {
+                            "value": f"{raw_directory}{item.name}{suffix}",
+                            "label": f"{item.name}{suffix}",
+                            "kind": "directory" if item.is_dir() else "file",
+                        }
+                    )
+        return {
+            "resolved_path": resolved,
+            "suggestions": suggestions,
+            "variables": variables,
+        }
+
     @staticmethod
     def _import_config_module(name: str | None) -> ModuleType | None:
         if name is None:
@@ -249,7 +346,7 @@ class DataCatalog:
                 )
             return os.fspath(resolved)
 
-        return str(Path(PATH_VARIABLE.sub(replace, value)).expanduser())
+        return str(Path(PATH_VARIABLE.sub(replace, value)).expanduser().absolute())
 
     @staticmethod
     def _matched_paths(value: str) -> list[Path]:

@@ -63,7 +63,7 @@ def _filter_code(item: dict[str, Any], schema: pl.Schema) -> str:
 
 def _aggregation_code(layer: dict[str, Any]) -> str:
     aggregation = layer["aggregation"]
-    if aggregation == "count":
+    if aggregation in {"count", "relative_count"}:
         return "pl.len()"
     column = f"pl.col({layer['y_column']!r})"
     if aggregation == "quantile":
@@ -74,8 +74,19 @@ def _aggregation_code(layer: dict[str, Any]) -> str:
 
 def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema: pl.Schema) -> str:
     variable = f"layer_{index}"
+    all_variable = f"{variable}_all"
     comment = str(layer["label"]).replace("\n", " ").replace("\r", " ")
     lines = [f"    # {comment}", f"    {variable} = {source_variable}"]
+    if layer["limit"] is not None:
+        lines.append(f"    {variable} = {variable}.limit({layer['limit']!r})")
+    required_filters = [_filter_code(item, schema) for item in layer["required_filters"]]
+    if required_filters:
+        lines.append(
+            f"    {variable} = {variable}.filter(pl.all_horizontal(["
+            f"{', '.join(required_filters)}]))"
+        )
+    if layer["aggregation"] == "relative_count":
+        lines.append(f"    {all_variable} = {variable}")
     filters = [_filter_code(item, schema) for item in layer["filters"]]
     if filters:
         combiner = "all_horizontal" if layer["filter_logic"] == "and" else "any_horizontal"
@@ -97,27 +108,76 @@ def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema:
         if x_column is None:
             lines.append(f"    {variable} = {variable}.with_row_index('_x', offset=1)")
     else:
-        groups = [column for column in (x_column, group_column) if column]
-        aggregation = _aggregation_code(layer) + ".alias('_y')"
+        x_key = "_time_bin" if layer["time_bin"] else x_column
+        if layer["time_bin"]:
+            truncate = (
+                f"pl.col({x_column!r}).dt.truncate({layer['time_bin']!r})"
+                ".alias('_time_bin')"
+            )
+            lines.append(f"    {variable} = {variable}.with_columns({truncate})")
+            if layer["aggregation"] == "relative_count":
+                lines.append(f"    {all_variable} = {all_variable}.with_columns({truncate})")
+        groups = [column for column in (x_key, group_column) if column]
+        if layer["aggregation"] == "relative_count":
+            multiplier = (
+                100.0 if layer["aggregation_options"].get("scale") == "percent" else 1.0
+            )
+            if groups:
+                lines.extend(
+                    [
+                        f"    {all_variable} = {all_variable}.group_by({groups!r}).agg("
+                        "pl.len().alias('_denominator'))",
+                        f"    {variable} = {variable}.group_by({groups!r}).agg("
+                        "pl.len().alias('_numerator'))",
+                        f"    {variable} = {all_variable}.join({variable}, on={groups!r}, "
+                        "how='left').with_columns((pl.col('_numerator').fill_null(0).cast("
+                        f"pl.Float64) / pl.col('_denominator') * {multiplier!r}).alias('_y'))",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        f"    {all_variable} = {all_variable}.select("
+                        "pl.len().alias('_denominator'))",
+                        f"    {variable} = {variable}.select(pl.len().alias('_numerator'))",
+                        f"    {variable} = {all_variable}.join({variable}, how='cross').select(("
+                        "pl.col('_numerator').cast(pl.Float64) / pl.col('_denominator') * "
+                        f"{multiplier!r}).alias('_y')).with_row_index('_x', offset=1)",
+                    ]
+                )
+        else:
+            aggregation = _aggregation_code(layer) + ".alias('_y')"
+            if groups:
+                lines.append(f"    {variable} = {variable}.group_by({groups!r}).agg({aggregation})")
+            else:
+                lines.append(
+                    f"    {variable} = {variable}.select({aggregation})"
+                    ".with_row_index('_x', offset=1)"
+                )
         if groups:
-            lines.append(f"    {variable} = {variable}.group_by({groups!r}).agg({aggregation})")
-            selections = [f"pl.col({x_column!r}).alias('_x')"]
+            selections = [f"pl.col({x_key!r}).alias('_x')"]
             if group_column:
                 selections.append(f"pl.col({group_column!r}).cast(pl.String).alias('_group')")
             selections.append("pl.col('_y')")
             lines.append(f"    {variable} = {variable}.select([{', '.join(selections)}])")
-        else:
-            lines.append(
-                f"    {variable} = {variable}.select({aggregation}).with_row_index('_x', offset=1)"
-            )
+    if layer["result_y_min"] is not None:
+        lines.append(
+            f"    {variable} = {variable}.filter("
+            f"pl.col('_y') >= {layer['result_y_min']!r})"
+        )
+    if layer["result_y_max"] is not None:
+        lines.append(
+            f"    {variable} = {variable}.filter("
+            f"pl.col('_y') <= {layer['result_y_max']!r})"
+        )
     if layer["sort"] != "none":
         column, descending = layer["sort"].split("_")
         lines.append(
             f"    {variable} = {variable}.sort('_{column}', "
             f"descending={descending == 'descending'!r}, nulls_last=True)"
         )
-    if layer["limit"] is not None:
-        lines.append(f"    {variable} = {variable}.limit({layer['limit']!r})")
+    if layer["result_limit"] is not None:
+        lines.append(f"    {variable} = {variable}.limit({layer['result_limit']!r})")
     lines.append(f"    {variable} = {variable}.collect(engine='streaming')")
     return "\n".join(lines)
 
@@ -130,7 +190,8 @@ def _draw_code(index: int, layer: dict[str, Any]) -> str:
         "    for group, group_frame in _groups(frame):",
         f"        label = {layer['label']!r} if group is None else "
         f"{layer['label']!r} + ': ' + str(group)",
-        f"        style = {{**DEFAULT_STYLE, **{layer['style']!r}}}",
+        f"        style = {{**DEFAULT_STYLE, 'color': STD_COLORS[{index} % "
+        f"len(STD_COLORS)], **{layer['style']!r}}}",
         "        if style.get('marker') == 'none':",
         "            style['marker'] = None",
         "        x = group_frame.get_column('_x').to_list()",
@@ -144,9 +205,10 @@ def _draw_code(index: int, layer: dict[str, Any]) -> str:
     if plot_type == "line":
         lines.append("        ax.plot(x, y, label=label, **plot_style)")
     elif plot_type == "step":
+        where = layer["options"].get("where", "post")
         lines.append(
             "        ax.step(x, y, label=label, "
-            "where=style.get('where', 'post'), **plot_style)"
+            f"where={where!r}, **plot_style)"
         )
     elif plot_type == "scatter":
         lines.extend(
@@ -192,10 +254,14 @@ def _draw_code(index: int, layer: dict[str, Any]) -> str:
             ]
         )
     elif plot_type == "box":
-        lines.append("        ax.boxplot(y, positions=[1], tick_labels=[label])")
+        position = float(layer["options"].get("position", 1))
+        lines.append(f"        ax.boxplot(y, positions=[{position!r}], tick_labels=[label])")
     elif plot_type == "violin":
         showmeans = bool(layer["options"].get("showmeans", False))
-        lines.append(f"        ax.violinplot(y, positions=[1], showmeans={showmeans!r})")
+        position = float(layer["options"].get("position", 1))
+        lines.append(
+            f"        ax.violinplot(y, positions=[{position!r}], showmeans={showmeans!r})"
+        )
     elif plot_type == "stem":
         lines.append("        ax.stem(x, y, label=label)")
     elif plot_type == "hexbin":
@@ -204,39 +270,60 @@ def _draw_code(index: int, layer: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _annotation_code(item: dict[str, Any]) -> str:
+def _annotation_code(item: dict[str, Any], axis: str = "primary") -> str:
     kind = item.get("kind")
     color = item.get("color", "#666666")
     alpha = float(item.get("alpha", 0.6))
+    text = str(item.get("text", "")).replace("\\n", "\n")
+    label = item["legend_label"] if item.get("show_in_legend", False) else "_nolegend_"
+    label_code = f"\n        _annotation_label({axis}, {item!r})" if text and kind != "text" else ""
     if kind == "vline":
         return (
-            f"    primary.axvline({item['x']!r}, color={color!r}, alpha={alpha!r}, "
-            f"linestyle={item.get('linestyle', '--')!r})"
-        )
+            f"        {axis}.axvline(_annotation_x({item['x']!r}), color={color!r}, "
+            f"alpha={alpha!r}, "
+            f"linestyle={item.get('linestyle', '--')!r}, "
+            f"linewidth={float(item.get('linewidth', 1.0))!r}, label={label!r})"
+        ) + label_code
     if kind == "hline":
         return (
-            f"    primary.axhline({item['y']!r}, color={color!r}, alpha={alpha!r}, "
-            f"linestyle={item.get('linestyle', '--')!r})"
-        )
+            f"        {axis}.axhline({item['y']!r}, color={color!r}, alpha={alpha!r}, "
+            f"linestyle={item.get('linestyle', '--')!r}, "
+            f"linewidth={float(item.get('linewidth', 1.0))!r}, label={label!r})"
+        ) + label_code
     if kind == "vspan":
         return (
-            f"    primary.axvspan({item['x1']!r}, {item['x2']!r}, "
-            f"color={color!r}, alpha={alpha!r})"
-        )
+            f"        {axis}.axvspan(_annotation_x({item['x1']!r}), "
+            f"_annotation_x({item['x2']!r}), "
+            f"color={color!r}, alpha={alpha!r}, label={label!r})"
+        ) + label_code
     if kind == "hspan":
         return (
-            f"    primary.axhspan({item['y1']!r}, {item['y2']!r}, "
-            f"color={color!r}, alpha={alpha!r})"
-        )
+            f"        {axis}.axhspan({item['y1']!r}, {item['y2']!r}, "
+            f"color={color!r}, alpha={alpha!r}, label={label!r})"
+        ) + label_code
     if kind == "text":
-        text = str(item.get("text", "")).replace("\\n", "\n")
-        return f"    primary.text({item['x']!r}, {item['y']!r}, {text!r})"
+        code = (
+            f"        if _annotation_y_visible({axis}, {item['y']!r}):\n"
+            f"            _foreground_text({axis}, _annotation_x({item['x']!r}), "
+            f"{item['y']!r}, {text!r}, "
+            f"color={item.get('text_color', color)!r}, "
+            f"alpha={alpha!r}, fontsize={float(item.get('fontsize', 10))!r}, "
+            f"bbox=_annotation_bbox({item!r}))"
+        )
+        if item.get("show_in_legend", False):
+            code += (
+                f"\n            {axis}.plot([], [], linestyle='none', marker='o', "
+                f"markersize=4, color={item.get('text_color', color)!r}, "
+                f"alpha={alpha!r}, label={label!r})"
+            )
+        return code
     raise ConfigurationError(f"unsupported annotation kind: {kind}")
 
 
 HELPERS = '''
+STD_COLORS = ["#375E97", "#FB6542", "#c1195c", "#37975e"]
 DEFAULT_STYLE = {
-    "color": "#0072b2",
+    "color": STD_COLORS[0],
     "alpha": 1.0,
     "linewidth": 1.5,
     "marker": "none",
@@ -263,7 +350,145 @@ def _limits(ax, lower, upper, axis):
         getattr(ax, f"set_{axis}lim")(lower, upper)
 
 
-def _ticks(ax, axes):
+def _grid(ax, enabled, axis, alpha):
+    if enabled:
+        ax.grid(True, axis=axis, which="major", alpha=alpha)
+    else:
+        ax.grid(False, axis=axis, which="major")
+
+
+def _automatic_x_limits(ax, values, time_bins):
+    if not values:
+        return
+    first = values[0]
+    try:
+        if isinstance(first, (datetime.date, datetime.datetime)):
+            coordinates = [float(mdates.date2num(value)) for value in values]
+            padding = _smallest_time_bin_days(time_bins) / 2
+        elif isinstance(first, (int, float)) and not isinstance(first, bool):
+            coordinates = [float(value) for value in values]
+            padding = max(abs(coordinates[0]) * 0.05, 0.5)
+        else:
+            return
+    except (TypeError, ValueError):
+        return
+    lower, upper = min(coordinates), max(coordinates)
+    if lower == upper:
+        lower -= padding
+        upper += padding
+    ax.set_xlim(lower, upper)
+
+
+def _smallest_time_bin_days(time_bins):
+    seconds_per_unit = {
+        "ns": 1e-9,
+        "us": 1e-6,
+        "ms": 1e-3,
+        "s": 1,
+        "m": 60,
+        "h": 3600,
+        "d": 86400,
+        "w": 7 * 86400,
+        "mo": 30 * 86400,
+        "q": 91 * 86400,
+        "y": 365 * 86400,
+    }
+    durations = []
+    for value in time_bins:
+        match = re.fullmatch(r"([1-9]\\d*)(ns|us|ms|s|m|h|d|w|mo|q|y)", value)
+        if match:
+            durations.append(int(match.group(1)) * seconds_per_unit[match.group(2)] / 86400)
+    return min(durations, default=1 / 1440)
+
+
+def _annotation_x(value):
+    if not isinstance(value, str):
+        return value
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+
+
+def _annotation_bbox(item):
+    if not item.get("text_background_enabled", False):
+        return None
+    return {
+        "facecolor": item.get("text_background_color", "#ffffff"),
+        "edgecolor": "none",
+        "alpha": float(item.get("alpha", 0.6)),
+        "pad": 2.0,
+    }
+
+
+def _foreground_text(
+    ax, x, y, text, transform=None, x_data=True, y_data=True, **options
+):
+    return ax.figure.text(
+        ax.convert_xunits(x) if x_data else x,
+        ax.convert_yunits(y) if y_data else y,
+        text,
+        transform=transform if transform is not None else ax.transData,
+        clip_on=False, zorder=1000, **options,
+    )
+
+
+def _annotation_y_visible(ax, y):
+    try:
+        lower, upper = sorted(ax.get_ylim())
+        return lower <= float(y) <= upper
+    except (TypeError, ValueError):
+        return True
+
+
+def _annotation_label(ax, item):
+    kind = item["kind"]
+    text = str(item.get("text", "")).replace("\\\\n", "\\n")
+    color = item.get("text_color", item.get("color", "#666666"))
+    alpha = float(item.get("alpha", 0.6))
+    fontsize = float(item.get("fontsize", 10))
+    if item.get("text_y") is not None:
+        lower, upper = sorted(ax.get_ylim())
+        if not lower <= float(item["text_y"]) <= upper:
+            return
+        _foreground_text(
+            ax,
+            _annotation_x(item.get("text_x", item.get("x", item.get("x1")))),
+            item["text_y"], text, color=color, alpha=alpha, fontsize=fontsize,
+            horizontalalignment=item.get("text_horizontal_alignment", "left"),
+            verticalalignment=item.get("text_vertical_alignment", "center"),
+            bbox=_annotation_bbox(item),
+        )
+        return
+    if kind in {"vline", "vspan"}:
+        try:
+            if not ax.get_subplotspec().is_first_row():
+                return
+        except AttributeError:
+            pass
+        x = item["x"] if kind == "vline" else item["x1"]
+        _foreground_text(
+            ax,
+            _annotation_x(x), 0.98, text, transform=ax.get_xaxis_transform(),
+            y_data=False,
+            color=color, alpha=alpha, fontsize=fontsize, rotation=90,
+            horizontalalignment="right", verticalalignment="top",
+            bbox=_annotation_bbox(item),
+        )
+    else:
+        y = item["y"] if kind == "hline" else item["y2"]
+        if not _annotation_y_visible(ax, y):
+            return
+        _foreground_text(
+            ax,
+            0.99, y, text, transform=ax.get_yaxis_transform(), color=color,
+            x_data=False,
+            alpha=alpha, fontsize=fontsize, horizontalalignment="right",
+            verticalalignment="bottom", bbox=_annotation_bbox(item),
+        )
+
+
+def _ticks(ax, axes, time_binned=False, x_values=None):
     if not axes["major_x_ticks"]:
         ax.xaxis.set_major_locator(mticker.NullLocator())
         ax.xaxis.set_minor_locator(mticker.NullLocator())
@@ -272,6 +497,26 @@ def _ticks(ax, axes):
     if ticks:
         labels = axes["custom_x_tick_labels"] or [str(value) for value in ticks]
         ax.set_xticks(ticks, labels)
+    elif axes.get("x_value_ticks", False) and x_values:
+        values = list(dict.fromkeys(x_values))
+        interval = int(axes.get("x_value_tick_interval", 1))
+        selected_indices = list(range(0, len(values), interval))
+        selected_values = [values[index] for index in selected_indices]
+        if values and isinstance(values[0], str):
+            ax.set_xticks(selected_indices, [str(value) for value in selected_values])
+        else:
+            ax.set_xticks(selected_values, [str(value) for value in selected_values])
+    elif time_binned:
+        locator = mdates.AutoDateLocator(minticks=3, maxticks=10)
+        ax.xaxis.set_major_locator(locator)
+        datetime_format = axes.get("x_datetime_format", "")
+        ax.xaxis.set_major_formatter(
+            mdates.DateFormatter(datetime_format)
+            if datetime_format
+            else mdates.ConciseDateFormatter(locator)
+        )
+    elif axes["x_engineering"]:
+        ax.xaxis.set_major_formatter(mticker.EngFormatter(sep=""))
     if axes["minor_x_ticks"]:
         locator = (
             mticker.LogLocator(base=10, subs=tuple(range(2, 10)))
@@ -288,6 +533,23 @@ def _ticks(ax, axes):
         horizontalalignment=axes["x_tick_horizontal_alignment"],
         verticalalignment=axes["x_tick_vertical_alignment"],
     )
+
+
+def _broken_axis_marks(axes):
+    size = 0.012
+    style = {"color": "black", "clip_on": False, "linewidth": 0.8}
+    for upper, lower in zip(axes, axes[1:]):
+        upper.spines["bottom"].set_visible(False)
+        lower.spines["top"].set_visible(False)
+        upper.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+        for x in (0, 1):
+            upper.plot(
+                (x - size, x + size), (-size, size), transform=upper.transAxes, **style
+            )
+            lower.plot(
+                (x - size, x + size), (1 - size, 1 + size),
+                transform=lower.transAxes, **style
+            )
 '''.strip()
 
 
@@ -296,6 +558,27 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
     plot_formats = [item for item in config["export_formats"] if item in {"png", "pdf"}]
     if not plot_formats:
         raise ConfigurationError("select PNG and/or PDF before exporting code")
+    if config["stages"]["enabled"]:
+        raise ConfigurationError(
+            "standalone code export does not yet support stages; use Download to export all stages"
+        )
+    if any(
+        layer.get("enabled", True) and layer.get("fix_x_values", False)
+        for layer in config["layers"]
+    ):
+        raise ConfigurationError(
+            "standalone code export does not yet support fixed shared X values; "
+            "use Download to export the rendered plot"
+        )
+    if any(
+        (annotation.get("inference") or {}).get("x", "manual") != "manual"
+        or (annotation.get("inference") or {}).get("y", "manual") != "manual"
+        for annotation in config["annotations"]
+    ):
+        raise ConfigurationError(
+            "standalone code export does not yet support inferred annotation coordinates; "
+            "use Download to export the rendered plot"
+        )
 
     enabled_layers = []
     for raw_layer in config["layers"]:
@@ -342,12 +625,14 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
         "",
         "import datetime",
         "import os",
+        "import re",
         "import sys",
         "import matplotlib as mpl",
         'mpl.use("Agg")',
         'mpl.rcParams["pdf.fonttype"] = 42',
         'mpl.rcParams["ps.fonttype"] = 42',
         "import matplotlib.pyplot as plt",
+        "import matplotlib.dates as mdates",
         "import matplotlib.ticker as mticker",
         "import polars as pl",
     ]
@@ -393,13 +678,76 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
 
     figure = config["figure"]
     axes = config["axes"]
+    global_font_size = float(figure["font_size"])
+    label_font_size = (
+        float(axes["label_font_size"])
+        if axes["label_font_size_override"]
+        else global_font_size
+    )
+    tick_font_size = (
+        float(axes["tick_font_size"])
+        if axes["tick_font_size_override"]
+        else global_font_size
+    )
+    legend_font_size = (
+        float(config["legend"]["font_size"])
+        if config["legend"]["font_size_override"]
+        else global_font_size
+    )
+    legend_options = (
+        f"loc={config['legend']['loc']!r}, ncols={int(config['legend']['ncols'])!r}, "
+        f"fontsize={legend_font_size!r}, "
+        f"handlelength={float(config['legend']['handlelength'])!r}, "
+        f"framealpha={float(config['legend']['opacity'])!r}"
+    )
+    if config["legend"]["bbox_enabled"]:
+        legend_options += (
+            f", bbox_to_anchor=({float(config['legend']['bbox_x'])!r}, "
+            f"{float(config['legend']['bbox_y'])!r})"
+        )
+    x_value_layers = [
+        index
+        for index, layer in enumerate(enabled_layers)
+        if layer["plot_type"] not in {"histogram", "box", "violin"}
+    ]
+    x_values_code = " + ".join(
+        f"layer_{index}.get_column('_x').drop_nulls().to_list()" for index in x_value_layers
+    ) or "[]"
+    time_bins = [layer["time_bin"] for layer in enabled_layers if layer["time_bin"]]
+    time_axis = any(
+        layer["time_bin"]
+        or (
+            layer["x_column"] is not None
+            and (
+                catalog.schema(layer["source"])[layer["x_column"]] == pl.Date
+                or isinstance(catalog.schema(layer["source"])[layer["x_column"]], pl.Datetime)
+            )
+        )
+        for layer in enabled_layers
+    )
+    broken_y = config["broken_y_axis"]
+    if broken_y["enabled"]:
+        figure_lines = [
+            "    fig, created_axes = plt.subplots(",
+            f"        nrows={len(broken_y['ranges'])!r}, sharex=True,",
+            f"        figsize=({float(figure['width'])!r}, {float(figure['height'])!r}),",
+            f"        gridspec_kw={{'hspace': {float(broken_y['gap'])!r}}},",
+            "    )",
+            "    primary_axes = list(created_axes)",
+            "    primary = primary_axes[-1]",
+        ]
+    else:
+        figure_lines = [
+            f"    fig, primary = plt.subplots(figsize="
+            f"({float(figure['width'])!r}, {float(figure['height'])!r}))",
+            "    primary_axes = [primary]",
+        ]
     main_lines = [
         "def main():",
         *source_lines,
         "",
         *[line for block in query_blocks for line in (block, "")],
-        f"    fig, primary = plt.subplots(figsize="
-        f"({float(figure['width'])!r}, {float(figure['height'])!r}))",
+        *figure_lines,
         "    secondary = None",
         "    state = {}",
     ]
@@ -413,30 +761,85 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
                 ]
             )
         else:
-            main_lines.append(f"    _draw_layer_{index}(primary, layer_{index}, state)")
+            main_lines.extend(
+                [
+                    "    for plot_axis in primary_axes:",
+                    f"        _draw_layer_{index}(plot_axis, layer_{index}, state)",
+                ]
+            )
     main_lines.extend(
         [
             f"    axes = {axes!r}",
-            "    primary.set_xscale(axes['xscale'])",
-            "    primary.set_yscale(axes['yscale'])",
+            "    for plot_axis in primary_axes:",
+            "        plot_axis.set_xscale(axes['xscale'])",
+            "        plot_axis.set_yscale(axes['yscale'])",
             "    if secondary is not None:",
             "        secondary.set_yscale(axes['secondary_yscale'])",
-            "    primary.set_xlabel(str(axes['xlabel']).replace('\\\\n', '\\n'))",
-            "    primary.set_ylabel(str(axes['ylabel']).replace('\\\\n', '\\n'))",
+            "    primary.set_xlabel(str(axes['xlabel']).replace('\\\\n', '\\n'), "
+            f"fontsize={label_font_size!r})",
+            (
+                "    fig.supylabel(str(axes['ylabel']).replace('\\\\n', '\\n'), "
+                f"fontsize={label_font_size!r})"
+                if broken_y["enabled"]
+                else "    primary.set_ylabel(str(axes['ylabel']).replace('\\\\n', '\\n'), "
+                f"fontsize={label_font_size!r})"
+            ),
             "    if secondary is not None:",
-            "        secondary.set_ylabel(str(axes['secondary_ylabel']).replace('\\\\n', '\\n'))",
+            "        secondary.set_ylabel(str(axes['secondary_ylabel']).replace('\\\\n', "
+            f"'\\n'), fontsize={label_font_size!r})",
+            "    if axes['xmin'] is None and axes['xmax'] is None:",
+            f"        _automatic_x_limits(primary, {x_values_code}, {time_bins!r})",
             "    _limits(primary, axes['xmin'], axes['xmax'], 'x')",
-            "    _limits(primary, axes['ymin'], axes['ymax'], 'y')",
-            "    if secondary is not None:",
-            "        _limits(secondary, axes['secondary_ymin'], axes['secondary_ymax'], 'y')",
-            "    _ticks(primary, axes)",
-            "    primary.grid(bool(axes['x_grid']), axis='x', which='major')",
-            "    primary.grid(bool(axes['y_grid']), axis='y', which='major')",
-            "    if secondary is not None:",
-            "        secondary.grid(bool(axes['secondary_y_grid']), axis='y', which='major')",
         ]
     )
-    main_lines.extend(_annotation_code(item) for item in config["annotations"])
+    if broken_y["enabled"]:
+        main_lines.extend(
+            [
+                f"    broken_ranges = {broken_y['ranges']!r}",
+                "    for plot_axis, value_range in zip(primary_axes, "
+                "reversed(broken_ranges), strict=True):",
+                "        plot_axis.set_ylim(value_range['min'], value_range['max'])",
+            ]
+        )
+    else:
+        main_lines.append("    _limits(primary, axes['ymin'], axes['ymax'], 'y')")
+    main_lines.extend(
+        [
+            "    if secondary is not None:",
+            "        _limits(secondary, axes['secondary_ymin'], axes['secondary_ymax'], 'y')",
+            f"    _ticks(primary, axes, {time_axis!r}, {x_values_code})",
+            "    if axes['y_engineering']:",
+            "        for plot_axis in primary_axes:",
+            "            plot_axis.yaxis.set_major_formatter(mticker.EngFormatter(sep=''))",
+            "    if secondary is not None and axes['secondary_y_engineering']:",
+            "        secondary.yaxis.set_major_formatter(mticker.EngFormatter(sep=''))",
+            "    for plot_axis in primary_axes:",
+            "        plot_axis.tick_params(axis='both', which='both', "
+            f"labelsize={tick_font_size!r})",
+            "    if secondary is not None:",
+            f"        secondary.tick_params(axis='y', which='both', labelsize={tick_font_size!r})",
+            "    for plot_axis in primary_axes:",
+            "        plot_axis.set_axisbelow(True)",
+            "        _grid(plot_axis, bool(axes['x_grid']), 'x', "
+            "float(axes['grid_alpha']))",
+            "        _grid(plot_axis, bool(axes['y_grid']), 'y', "
+            "float(axes['grid_alpha']))",
+            "    if secondary is not None:",
+            "        secondary.set_axisbelow(True)",
+            "        _grid(secondary, bool(axes['secondary_y_grid']), 'y', "
+            "float(axes['grid_alpha']))",
+            "    for plot_axis in primary_axes:",
+        ]
+    )
+    main_lines.extend(
+        _annotation_code(item, "plot_axis")
+        for item in config["annotations"]
+        if item.get("enabled", True)
+    )
+    if not any(item.get("enabled", True) for item in config["annotations"]):
+        main_lines.append("        pass")
+    if broken_y["enabled"]:
+        main_lines.append("    _broken_axis_marks(primary_axes)")
     if config["legend"]["enabled"]:
         main_lines.extend(
             [
@@ -447,8 +850,11 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
                 "            handles.extend(current_handles)",
                 "            labels.extend(current_labels)",
                 "    if handles:",
-                f"        primary.legend(handles, labels, loc={config['legend']['loc']!r}, "
-                f"ncols={int(config['legend']['ncols'])!r})",
+                (
+                    f"        primary_axes[0].legend(handles, labels, {legend_options})"
+                    if broken_y["enabled"]
+                    else f"        primary.legend(handles, labels, {legend_options})"
+                ),
             ]
         )
     if figure["font_family"] == "monospace":
@@ -458,12 +864,12 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
                 "        text.set_fontfamily('monospace')",
             ]
         )
-    main_lines.extend(
-        [
-            "    fig.tight_layout()",
-            "    try:",
-        ]
+    main_lines.append(
+        f"    fig.subplots_adjust(hspace={float(broken_y['gap'])!r})"
+        if broken_y["enabled"]
+        else "    fig.tight_layout()"
     )
+    main_lines.append("    try:")
     for output_format in plot_formats:
         output = f"{config['filename']}.{output_format}"
         main_lines.extend(

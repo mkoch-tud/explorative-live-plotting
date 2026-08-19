@@ -6,6 +6,7 @@ from io import BytesIO
 import os
 from pathlib import Path
 from threading import Lock
+import time
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -17,7 +18,13 @@ from .codegen import generate_script
 from .data import DataCatalog, SourceSpec
 from .errors import ConfigurationError
 from .logging import log
-from .plotting import default_config, preview, render_artifacts, validate_config
+from .plotting import (
+    default_config,
+    migrate_legacy_config,
+    preview,
+    render_artifacts,
+    validate_config,
+)
 from .query import QueryEngine
 from .registry import Registry
 
@@ -36,6 +43,70 @@ class ApplicationState:
         self.engine = QueryEngine(catalog, registry, cache)
         self.output_dir = output_dir
         self.render_lock = Lock()
+        self.system_metrics = SystemMetrics()
+
+
+class SystemMetrics:
+    """Read lightweight whole-system metrics without an optional runtime dependency."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._previous_cpu: tuple[int, int] | None = self._cpu_times()
+
+    @staticmethod
+    def _cpu_times() -> tuple[int, int] | None:
+        try:
+            fields = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
+            values = [int(value) for value in fields]
+        except (OSError, ValueError, IndexError):
+            return None
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        non_idle = sum(values[:3]) + sum(values[5:8])
+        return idle + non_idle, idle
+
+    @staticmethod
+    def _memory() -> tuple[int, int] | None:
+        try:
+            entries = {
+                key.rstrip(":"): int(value) * 1024
+                for key, value, *_ in (
+                    line.split() for line in Path("/proc/meminfo").read_text().splitlines()
+                )
+            }
+            total = entries["MemTotal"]
+            available = entries["MemAvailable"]
+            return total - available, total
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def sample(self) -> dict[str, Any]:
+        with self._lock:
+            current = self._cpu_times()
+            cpu_percent = None
+            if current is not None:
+                if self._previous_cpu is None:
+                    total_delta, idle_delta = current
+                else:
+                    total_delta = current[0] - self._previous_cpu[0]
+                    idle_delta = current[1] - self._previous_cpu[1]
+                if total_delta > 0:
+                    cpu_percent = 100.0 * (total_delta - idle_delta) / total_delta
+                self._previous_cpu = current
+        memory = self._memory()
+        used, total = memory if memory is not None else (None, None)
+        ram_percent = 100.0 * used / total if used is not None and total else None
+        try:
+            load_average = os.getloadavg()[0]
+        except (AttributeError, OSError):
+            load_average = None
+        return {
+            "cpu_percent": cpu_percent,
+            "load_average_1m": load_average,
+            "ram_used_bytes": used,
+            "ram_total_bytes": total,
+            "ram_percent": ram_percent,
+            "sampled_at": time.time(),
+        }
 
 
 def _download(artifacts: dict[str, bytes], basename: str) -> Response:
@@ -129,6 +200,22 @@ def create_app(state: ApplicationState) -> Flask:
             }
         )
 
+    @app.get("/api/path-suggestions")
+    def path_suggestions():
+        value = request.args.get("value", "")
+        if len(value) > 4096:
+            raise ConfigurationError("source path is too long")
+        return jsonify(state.catalog.complete_path(value))
+
+    @app.get("/api/system-stats")
+    def system_stats():
+        return jsonify(state.system_metrics.sample())
+
+    @app.post("/api/migrate-config")
+    def migrate_config():
+        config, warnings = migrate_legacy_config(request.get_json(silent=False))
+        return jsonify({"config": config, "warnings": warnings})
+
     @app.post("/api/config-module")
     def set_config_module():
         raw = request.get_json(silent=False)
@@ -213,7 +300,14 @@ def create_app(state: ApplicationState) -> Flask:
         config, (artifacts, cache_states) = render()
         files = _save(state.output_dir, artifacts)
         log(f"Saved {len(files)} artifact(s) under {state.output_dir}")
-        return jsonify({"files": files, "cache": cache_states, "config": config})
+        return jsonify(
+            {
+                "files": files,
+                "previews": preview(artifacts),
+                "cache": cache_states,
+                "config": config,
+            }
+        )
 
     @app.post("/api/cache/clear")
     def clear_cache():

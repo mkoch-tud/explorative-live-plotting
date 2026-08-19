@@ -27,6 +27,7 @@ BUILTIN_AGGREGATIONS = {
     "first",
     "last",
     "count",
+    "relative_count",
     "n_unique",
     "quantile",
 }
@@ -110,7 +111,7 @@ def _step(context: PlotContext) -> None:
         context.x,
         context.y,
         label=context.label,
-        where=context.style.get("where", "post"),
+        where=context.layer.get("options", {}).get("where", "post"),
         **_style(context),
     )
 
@@ -162,7 +163,7 @@ def _histogram(context: PlotContext) -> None:
 def _box(context: PlotContext) -> None:
     context.ax.boxplot(
         context.y,
-        positions=[context.layer.get("position", 1)],
+        positions=[float(context.layer.get("options", {}).get("position", 1))],
         tick_labels=[context.label],
     )
 
@@ -170,7 +171,7 @@ def _box(context: PlotContext) -> None:
 def _violin(context: PlotContext) -> None:
     context.ax.violinplot(
         context.y,
-        positions=[context.layer.get("position", 1)],
+        positions=[float(context.layer.get("options", {}).get("position", 1))],
         showmeans=bool(context.layer.get("options", {}).get("showmeans", False)),
     )
 
@@ -201,6 +202,9 @@ def builtins() -> Registry:
     registry.aggregation("first", lambda column, options: _value(column).first())
     registry.aggregation("last", lambda column, options: _value(column).last())
     registry.aggregation("count", lambda column, options: pl.len())
+    # QueryEngine handles the denominator before applying layer filters.  Keeping
+    # this registered expression preserves the public aggregation registry API.
+    registry.aggregation("relative_count", lambda column, options: pl.len())
     registry.aggregation("n_unique", lambda column, options: _value(column).n_unique())
     registry.aggregation(
         "quantile",

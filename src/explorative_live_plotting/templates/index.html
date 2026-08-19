@@ -7,14 +7,16 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body>
-  <header><h1>Explorative Live Plotting</h1><span id="status">Loading…</span></header>
-  <main>
-    <aside>
+  <datalist id="time-bins"><option value="1s"><option value="1m"><option value="5m"><option value="15m"><option value="1h"><option value="1d"><option value="1w"><option value="1mo"><option value="1y"></datalist>
+  <header><h1>Explorative Live Plotting</h1><div class="header-options"><label class="live"><input id="live-update" type="checkbox" checked> Live style updates</label><label class="live"><input id="show-system-stats" type="checkbox"> Show RAM/CPU</label></div></header>
+  <main id="workspace">
+    <aside id="config-panel">
       <fieldset><legend>Lazy data sources</legend>
         <label>Config module<input id="config-module" placeholder="ipv6_ndpi.config"></label>
         <button id="apply-config-module">Apply config module</button>
         <label>Name<input id="source-name" placeholder="measurements"></label>
-        <label>Path or glob<input id="source-path" placeholder="${DATA_PATH}/measurements/*.parquet"></label>
+        <label>Path or glob<div class="path-completer"><input id="source-path" role="combobox" aria-autocomplete="list" aria-controls="source-path-suggestions" aria-expanded="false" autocomplete="off" placeholder="${DATA_PATH}/measurements/*.parquet"><div id="source-path-suggestions" class="path-suggestions" role="listbox" hidden></div></div></label>
+        <small id="source-path-resolved" class="path-resolution"></small>
         <label>Format<select id="source-format"><option>auto</option><option>csv</option><option>parquet</option><option>ndjson</option><option>ipc</option></select></label>
         <label>CSV separator<input id="source-separator" maxlength="2" placeholder=", or ; or \t"></label>
         <label>Reader options (JSON)<textarea id="source-options">{}</textarea></label>
@@ -23,20 +25,29 @@
       <fieldset><legend>Plot layers</legend><div id="layers"></div><button id="add-layer">Add layer</button></fieldset>
       <fieldset><legend>Axes and figure</legend>
         <div class="grid"><label>Width [in]<input id="width" type="number" value="8" step=".1"></label><label>Height [in]<input id="height" type="number" value="4.5" step=".1"></label></div>
+        <div class="grid"><label>Global font size<input id="font-size" type="number" value="10" min="1" step="1"></label><label><span><input id="label-font-override" type="checkbox"> Separate label size</span><input id="label-font-size" type="number" value="10" min="1" step="1"></label><label><span><input id="tick-font-override" type="checkbox"> Separate tick size</span><input id="tick-font-size" type="number" value="10" min="1" step="1"></label><label><span><input id="legend-font-override" type="checkbox"> Separate legend size</span><input id="legend-font-size" type="number" value="10" min="1" step="1"></label></div>
         <div class="grid"><label>X label<input id="xlabel"></label><label>Y label<input id="ylabel"></label></div>
         <label>Secondary Y label<input id="secondary-ylabel"></label>
         <div class="grid"><label>X scale<select id="xscale"><option>linear</option><option>log</option><option>symlog</option><option>logit</option></select></label><label>Y scale<select id="yscale"><option>linear</option><option>log</option><option>symlog</option><option>logit</option></select></label></div>
         <div class="grid"><label>X min<input id="xmin" type="number" step="any"></label><label>X max<input id="xmax" type="number" step="any"></label><label>Y min<input id="ymin" type="number" step="any"></label><label>Y max<input id="ymax" type="number" step="any"></label></div>
         <label>Custom x ticks<input id="xticks" placeholder="1, 500, 1000"></label><label>Custom tick labels<input id="xtick-labels" placeholder="one, five hundred, thousand"></label>
+        <div class="grid"><label><span><input id="x-value-ticks" type="checkbox"> Use actual X-column values as tick labels</span><small>For categorical plots, show values such as DEU, NLD, and USA. Explicit custom ticks above take precedence.</small></label><label>X-value tick interval<input id="x-value-tick-interval" type="number" value="1" min="1" step="1"><small>1 shows every value; 2 shows every second value.</small></label></div>
+        <label>Datetime tick format (optional)<input id="x-datetime-format" placeholder="%b %d or %Y-%m-%d %H:%M"><small>Leave empty for automatic concise dates. Common codes: <code>%Y</code> four-digit year, <code>%y</code> short year, <code>%b</code> abbreviated month, <code>%B</code> full month, <code>%m</code> month number, <code>%d</code> day, <code>%H</code> hour, <code>%M</code> minute, <code>%S</code> second. Examples: <code>%b %d</code> → Apr 01; <code>%b %d, %Y</code> → Apr 01, 2026.</small></label>
         <div class="grid"><label>Tick rotation<input id="rotation" type="number" value="0"></label><label>Horizontal<select id="tick-ha"><option>center</option><option>left</option><option>right</option></select></label><label>Vertical<select id="tick-va"><option>top</option><option>center</option><option>bottom</option><option>baseline</option></select></label></div>
-        <div class="checks"><label><input id="major-x" type="checkbox" checked> Major x ticks</label><label><input id="minor-x" type="checkbox"> Minor x ticks</label><label><input id="x-grid" type="checkbox"> X grid</label><label><input id="y-grid" type="checkbox" checked> Y grid</label><label><input id="secondary-grid" type="checkbox"> Secondary Y grid</label><label><input id="legend" type="checkbox" checked> Legend</label><label><input id="mono" type="checkbox"> Mono font</label></div>
+        <div class="checks"><label><input id="major-x" type="checkbox" checked> Major x ticks</label><label><input id="minor-x" type="checkbox"> Minor x ticks</label><label><input id="x-engineering" type="checkbox"> Engineering X</label><label><input id="y-engineering" type="checkbox"> Engineering Y</label><label><input id="secondary-y-engineering" type="checkbox"> Engineering secondary Y</label><label><input id="x-grid" type="checkbox"> X grid</label><label><input id="y-grid" type="checkbox" checked> Y grid</label><label><input id="secondary-grid" type="checkbox"> Secondary Y grid</label><label><input id="legend" type="checkbox" checked> Legend</label><label><input id="mono" type="checkbox"> Mono font</label></div>
+        <label>Grid opacity<input id="grid-opacity" type="number" value="0.5" min="0" max="1" step="0.05"><small>0 makes enabled grids invisible; 1 makes them fully opaque. Grids remain behind all plot layers.</small></label>
+        <fieldset class="nested"><legend>Broken Y axis</legend><div class="checks"><label><input id="broken-y-enabled" type="checkbox"> Enable stacked Y ranges</label></div><label>Panel gap<input id="broken-y-gap" type="number" value="0.1" min="0" max="5" step="0.05"></label><div id="broken-y-ranges"></div><button id="add-broken-y-range" type="button">Add Y range</button><small>Panel gap is Matplotlib's fractional hspace: 0 puts panels very close together, while larger values add more vertical separation. Values from 0 to 5 are accepted. Ranges are ordered low-to-high and render bottom-to-top with shared X ticks and diagonal break marks.</small></fieldset>
+        <fieldset class="nested"><legend>Legend placement</legend><div class="grid"><label>Anchor point<select id="legend-loc"><option>best</option><option>upper right</option><option>upper left</option><option>lower left</option><option>lower right</option><option>right</option><option>center left</option><option>center right</option><option>lower center</option><option>upper center</option><option>center</option></select></label><label>Columns<input id="legend-ncols" type="number" value="1" min="1" step="1"></label><label>Handle length<input id="legend-handlelength" type="number" value="2" min="0" step="0.1"></label><label>Opacity<input id="legend-opacity" type="number" value="0.8" min="0" max="1" step="0.05"></label></div><div class="checks"><label><input id="legend-bbox-enabled" type="checkbox"> Custom bbox_to_anchor</label></div><div class="grid"><label>Bbox X<input id="legend-bbox-x" type="number" value="1" step="0.05"></label><label>Bbox Y<input id="legend-bbox-y" type="number" value="1" step="0.05"></label></div></fieldset>
       </fieldset>
-      <fieldset><legend>Annotations</legend><textarea id="annotations">[]</textarea><small>JSON array: vline, hline, vspan, hspan, or text.</small></fieldset>
+      <fieldset><legend>Annotations</legend><div id="annotation-editors"></div><button id="add-annotation">Add annotation</button><details><summary>Advanced annotation JSON</summary><textarea id="annotations">[]</textarea><small>Editing this JSON replaces the structured annotation list.</small></details></fieldset>
+      <fieldset><legend>Stages</legend><div class="checks"><label><input id="stages-enabled" type="checkbox"> Create staged plots</label></div><label>Overlay opacity<input id="overlay-alpha" type="number" value="0.25" min="0" max="1" step="0.05"></label><div class="stage-actions"><button id="generate-stages">Generate cumulative stages</button><button id="add-stage">Add stage</button></div><small>Include elements per stage; mark selected layers as overlays to fade them.</small><div id="stages"></div></fieldset>
       <fieldset><legend>Export</legend><label>Filename<input id="filename" value="explorative-plot"></label><div class="checks"><label><input id="png" type="checkbox" checked> PNG</label><label><input id="pdf" type="checkbox" checked> PDF</label><label><input id="json" type="checkbox" checked> JSON config</label></div><input id="load-config" type="file" accept="application/json"><button id="export-code">Export code</button><button id="clear-cache">Clear cache</button></fieldset>
       <div class="actions"><button id="render" class="primary">Render</button><button id="save">Save</button><button id="download">Download</button></div>
     </aside>
+    <div id="panel-resizer" class="panel-resizer" role="separator" aria-label="Resize configuration panel" aria-orientation="vertical" tabindex="0"></div>
     <section id="output"><div id="message">Add a source and layer, then render.</div><div id="previews"></div></section>
   </main>
+  <aside id="system-stats" class="system-stats" hidden aria-live="polite"></aside>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

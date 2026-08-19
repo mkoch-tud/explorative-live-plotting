@@ -53,8 +53,9 @@ class QueryCache:
         with self._lock:
             self._memory.clear()
         if self.directory.is_dir():
-            for path in self.directory.glob("*.ipc"):
-                path.unlink()
+            for pattern in ("*.ipc", ".*.tmp"):
+                for path in self.directory.glob(pattern):
+                    path.unlink()
 
     def _remember(self, key: str, frame: pl.DataFrame) -> None:
         if self.memory_entries == 0:
