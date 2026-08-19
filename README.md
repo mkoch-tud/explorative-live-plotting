@@ -5,8 +5,6 @@ arbitrary tabular files with Polars lazy scans, performs only the operations
 needed for the selected plot layers, caches collected query results, and renders
 with Matplotlib.
 
-The project has no dependency on `ipv6_ndpi` or a particular data schema.
-
 ## Install and run
 
 ```bash
