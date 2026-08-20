@@ -1,22 +1,29 @@
-# Explorative Live Plotting
+# Explorative Live Plotting [elp]
 
-A standalone localhost plotting workbench for exploratory analysis. It reads
-arbitrary tabular files with Polars lazy scans, performs only the operations
-needed for the selected plot layers, caches collected query results, and renders
-with Matplotlib.
+Plugin your data source and explore it using live plotting instead of jupyter notebooks.
+The plot renders (most of the time) live in the Web-UI and can be customized without having to write any code.
+For reproducibility, the framework creates .json config files which allow to easily reload a plot again and edit it.
+Furthermore, plots can be downloaded in .png and .pdf format and can be edited to be "paper-ready".
+To enhance reproducibility for artifact evaluation the script can generate a standalone python script that calls the data sources and plots the figures as configured (this functionality hasn't been tested yet).
+
+## Note on AI usage
+
+This repository is entirely vibe coded with `gpt-5.6-sol` (medium/high reasoning).
 
 ## Install and run
 
+Clone this repo, then:
+
 ```bash
-cd /mnt/data/explorative-live-plotting
+cd explorative-live-plotting
 python3 -m venv .venv
-.venv/bin/pip install -e .
-.venv/bin/elp --source measurements=/path/to/data.parquet
+source .venv/bin/activate
+pip install -e .
+elp
 ```
 
-Open <http://127.0.0.1:9000>. Sources can also be registered in the browser.
-Run the command from any project directory; relative output and cache paths are
-resolved from that directory.
+Open <http://127.0.0.1:9000>. Sources can be registered in the browser,. but you can pass cli arguments to register them directly (see below).
+Run the command from any project directory; relative output and cache paths are resolved from that directory.
 
 Useful options:
 
