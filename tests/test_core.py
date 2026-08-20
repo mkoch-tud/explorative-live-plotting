@@ -1181,6 +1181,8 @@ def test_nested_time_filters_and_column_excerpt(tmp_path: Path) -> None:
     secondary_tick_config["layers"] = [{**raw_layer, "secondary_y": True}]
     secondary_tick_config["axes"].update(
         {
+            "minor_y_ticks": True,
+            "secondary_minor_y_ticks": True,
             "secondary_yscale": "log",
             "secondary_ymin": 10,
             "secondary_ymax": 1000,
@@ -1191,6 +1193,11 @@ def test_nested_time_filters_and_column_excerpt(tmp_path: Path) -> None:
     secondary_tick_config = validate_config(secondary_tick_config, registry)
     secondary_tick_figure, _ = build_figure(secondary_tick_config, engine, registry)
     secondary_axis = secondary_tick_figure.axes[1]
+    assert isinstance(
+        secondary_tick_figure.axes[0].yaxis.get_minor_locator(),
+        mticker.AutoMinorLocator,
+    )
+    assert isinstance(secondary_axis.yaxis.get_minor_locator(), mticker.LogLocator)
     assert secondary_axis.get_yscale() == "log"
     assert secondary_axis.get_ylim() == (10, 1000)
     assert secondary_axis.get_yticks().tolist() == [10, 100, 1000]
@@ -1203,6 +1210,11 @@ def test_nested_time_filters_and_column_excerpt(tmp_path: Path) -> None:
     compile(secondary_tick_script, "secondary-y-ticks.py", "exec")
     assert "secondary.set_yscale(axes['secondary_yscale'])" in secondary_tick_script
     assert "_y_ticks(secondary, axes, secondary=True)" in secondary_tick_script
+    assert "_minor_y_ticks(plot_axis, axes['minor_y_ticks'])" in secondary_tick_script
+    assert (
+        "_minor_y_ticks(secondary, axes['secondary_minor_y_ticks'])"
+        in secondary_tick_script
+    )
 
     page = (
         Path(__file__).parents[1]
@@ -1210,6 +1222,8 @@ def test_nested_time_filters_and_column_excerpt(tmp_path: Path) -> None:
     ).read_text()
     assert 'id="secondary-yscale"' in page
     assert 'id="secondary-yticks"' in page
+    assert 'id="minor-y"' in page
+    assert 'id="secondary-minor-y"' in page
 
 
 def test_fonts_structured_annotations_and_stages(tmp_path: Path) -> None:

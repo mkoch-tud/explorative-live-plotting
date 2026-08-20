@@ -75,6 +75,8 @@ def default_config(config_module: str | None = None) -> dict[str, Any]:
             "grid_alpha": 0.5,
             "major_x_ticks": True,
             "minor_x_ticks": False,
+            "minor_y_ticks": False,
+            "secondary_minor_y_ticks": False,
             "custom_x_ticks": [],
             "custom_x_tick_labels": [],
             "custom_y_ticks": [],
@@ -239,6 +241,10 @@ def migrate_legacy_config(raw: Any) -> tuple[dict[str, Any], list[str]]:
             "secondary_y_grid": bool(secondary_y_axis.get("grid", False)),
             "major_x_ticks": bool(x_axis.get("ticks_enabled", True)),
             "minor_x_ticks": bool(x_axis.get("minor_ticks", False)),
+            "minor_y_ticks": bool(y_axis.get("minor_ticks", False)),
+            "secondary_minor_y_ticks": bool(
+                secondary_y_axis.get("minor_ticks", False)
+            ),
             "custom_x_ticks": (
                 [] if chart_mode == "ranked" else deepcopy(chart.get("x_ticks") or [])
             ),
@@ -600,6 +606,10 @@ def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
         raise ConfigurationError("X-value tick interval must be a positive integer")
     axes["x_value_ticks"] = bool(axes.get("x_value_ticks", False))
     axes["x_value_tick_interval"] = value_tick_interval
+    axes["minor_y_ticks"] = bool(axes.get("minor_y_ticks", False))
+    axes["secondary_minor_y_ticks"] = bool(
+        axes.get("secondary_minor_y_ticks", False)
+    )
     datetime_format = axes.get("x_datetime_format", "")
     if not isinstance(datetime_format, str):
         raise ConfigurationError("datetime tick format must be a string")
@@ -1335,10 +1345,12 @@ def build_figure(config: dict[str, Any], engine: QueryEngine, registry: Registry
             axis.yaxis.set_major_formatter(mticker.EngFormatter(sep=""))
     for axis in primary_axes:
         _y_ticks(axis, axes)
+        _minor_y_ticks(axis, axes["minor_y_ticks"])
     if secondary is not None and axes["secondary_y_engineering"]:
         secondary.yaxis.set_major_formatter(mticker.EngFormatter(sep=""))
     if secondary is not None:
         _y_ticks(secondary, axes, secondary=True)
+        _minor_y_ticks(secondary, axes["secondary_minor_y_ticks"])
     for axis in primary_axes:
         axis.tick_params(axis="both", which="both", labelsize=tick_font_size)
     if secondary is not None:
@@ -1625,6 +1637,16 @@ def _y_ticks(ax, axes: dict[str, Any], secondary: bool = False) -> None:
     ax.yaxis.set_major_locator(mticker.FixedLocator(ticks))
     if labels:
         ax.yaxis.set_major_formatter(mticker.FixedFormatter(labels))
+
+
+def _minor_y_ticks(ax, enabled: bool) -> None:
+    if enabled:
+        # Axis.minorticks_on selects a locator appropriate for the active scale
+        # (linear, log, symlog, or logit).
+        ax.yaxis.minorticks_on()
+        ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+    else:
+        ax.yaxis.set_minor_locator(mticker.NullLocator())
 
 
 def _resolve_annotation(

@@ -608,6 +608,14 @@ def _y_ticks(ax, axes, secondary=False):
         ax.yaxis.set_major_formatter(mticker.FixedFormatter(labels))
 
 
+def _minor_y_ticks(ax, enabled):
+    if enabled:
+        ax.yaxis.minorticks_on()
+        ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+    else:
+        ax.yaxis.set_minor_locator(mticker.NullLocator())
+
+
 def _broken_axis_marks(axes):
     size = 0.012
     style = {"color": "black", "clip_on": False, "linewidth": 0.8}
@@ -892,10 +900,12 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
             "            plot_axis.yaxis.set_major_formatter(mticker.EngFormatter(sep=''))",
             "    for plot_axis in primary_axes:",
             "        _y_ticks(plot_axis, axes)",
+            "        _minor_y_ticks(plot_axis, axes['minor_y_ticks'])",
             "    if secondary is not None and axes['secondary_y_engineering']:",
             "        secondary.yaxis.set_major_formatter(mticker.EngFormatter(sep=''))",
             "    if secondary is not None:",
             "        _y_ticks(secondary, axes, secondary=True)",
+            "        _minor_y_ticks(secondary, axes['secondary_minor_y_ticks'])",
             "    for plot_axis in primary_axes:",
             "        plot_axis.tick_params(axis='both', which='both', "
             f"labelsize={tick_font_size!r})",

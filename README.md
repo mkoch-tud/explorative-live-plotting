@@ -259,6 +259,8 @@ be supplied independently, and explicit limits are reapplied after tick
 placement so custom ticks cannot enlarge the visible range. Numeric axes accept
 numbers, categorical axes accept actual X values, and date/time axes accept ISO
 values such as `2026-04-01T00:05:00+00:00`.
+Primary and secondary Y axes have independent minor-tick checkboxes. The minor
+locator follows the selected scale, including linear, log, symlog, and logit.
 
 Primary Y ticks can be configured in two ways. **Custom Y ticks** accepts exact
 comma-separated positions, with optional matching labels. Alternatively, set
