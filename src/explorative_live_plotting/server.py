@@ -252,6 +252,29 @@ def create_app(state: ApplicationState) -> Flask:
         frame = state.catalog.lazy(name).head(rows).collect(engine="streaming")
         return jsonify({"columns": frame.columns, "rows": frame.to_dicts()})
 
+    @app.get("/api/sources/<name>/column-excerpt")
+    def source_column_excerpt(name: str):
+        column = str(request.args.get("column") or "").strip()
+        if not column:
+            raise ConfigurationError("column is required")
+        try:
+            intermediate = int(request.args.get("intermediate", "3"))
+        except ValueError as error:
+            raise ConfigurationError("intermediate value count must be an integer") from error
+        return jsonify(state.catalog.column_excerpt(name, column, intermediate))
+
+    @app.get("/api/sources/<name>/column-values")
+    def source_column_values(name: str):
+        column = str(request.args.get("column") or "").strip()
+        if not column:
+            raise ConfigurationError("column is required")
+        try:
+            offset = int(request.args.get("offset", "0"))
+            limit = int(request.args.get("limit", "250"))
+        except ValueError as error:
+            raise ConfigurationError("column-value offset and limit must be integers") from error
+        return jsonify(state.catalog.column_values(name, column, offset, limit))
+
     def request_config() -> dict[str, Any]:
         config = validate_config(request.get_json(silent=False), state.registry)
         if config["config_module"] != state.catalog.config_module:

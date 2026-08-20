@@ -10,6 +10,9 @@ let pathSuggestionSequence = 0;
 let pathSuggestions = [];
 let pathSuggestionIndex = -1;
 let systemStatsTimer = null;
+let filterControlSequence = 0;
+const filterSampleCache = new WeakMap();
+const filterTimeValueCache = new WeakMap();
 const STD_COLORS = ['#375E97', '#FB6542', '#c1195c', '#37975e'];
 
 const escapeHtml = value => String(value).replace(
@@ -22,6 +25,11 @@ const option = (values, selected, empty = false) => (
 );
 const source = name => bootstrap.sources.find(item => item.name === name);
 const columns = name => (source(name)?.columns ?? []).map(item => item.name);
+const columnMetadata = (sourceName, column) => (source(sourceName)?.columns ?? []).find(item => item.name === column);
+const temporalColumn = (sourceName, column) => /^(Date|Datetime)/.test(columnMetadata(sourceName, column)?.dtype ?? '');
+const filterConditions = items => (items ?? []).flatMap(item => (
+  isFilterGroup(item) ? filterConditions(item.filters) : [item]
+));
 const scalar = value => {
   const text = String(value).trim();
   if (text === '') return '';
@@ -38,6 +46,7 @@ function updatePreviews(previews) {
   $('previews').innerHTML = previews.map(item => `<div class="preview"><strong>${escapeHtml(item.filename)}</strong><img alt="${escapeHtml(item.filename)}" src="${item.image}"></div>`).join('');
 }
 function numberValue(id) { return $(id).value === '' ? null : Number($(id).value); }
+function scalarValue(id) { return $(id).value.trim() === '' ? null : scalar($(id).value); }
 function csvNumbers(id) { return $(id).value.split(',').map(x => x.trim()).filter(Boolean).map(Number); }
 function csvText(id) { return $(id).value.split(',').map(x => x.trim()).filter(Boolean); }
 
@@ -193,7 +202,7 @@ function ensureConfig() {
     item.inference ??= {x: 'manual', y: 'manual', layer_ids: []};
     item.inference.x ??= 'manual'; item.inference.y ??= 'manual';
     item.inference.layer_ids ??= [];
-    item.fontsize ??= config.figure.font_size ?? 10;
+    item.fontsize ??= config.figure.font_size ?? 12;
     item.step ??= 1;
   });
 }
@@ -223,7 +232,7 @@ function newAnnotation(kind = 'text') {
     inference: {x: 'manual', y: 'manual', layer_ids: []},
     x: 0, y: 0, x1: 0, x2: 1,
     y1: 0, y2: 1, color: '#666666', alpha: 0.6, linestyle: '--',
-    fontsize: config.figure?.font_size ?? 10, step: 1,
+    fontsize: config.figure?.font_size ?? 12, step: 1,
   };
 }
 
@@ -266,16 +275,140 @@ function renderSources() {
   }
 }
 
-function filterRow(layer, item) {
+const newFilter = layer => ({column: columns(layer.source)[0] ?? '', operator: 'eq', value: ''});
+const newFilterGroup = layer => ({type: 'group', logic: 'and', filters: [newFilter(layer)]});
+const isFilterGroup = item => item?.type === 'group';
+const filterOperatorOptions = selected => [
+  ['eq', 'equals (=)'], ['ne', 'not equal (≠)'], ['gt', 'greater than (>)'],
+  ['ge', 'minimum / at or after (≥)'], ['lt', 'less than (<)'],
+  ['le', 'maximum / at or before (≤)'], ['between', 'between (inclusive)'],
+  ['in', 'in comma-separated list'], ['not_in', 'not in comma-separated list'],
+  ['is_null', 'is null'], ['is_not_null', 'is not null'],
+].map(([value, label]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
+
+function renderTimeValueSelect(select, status, item, state) {
+  const current = String(item.value ?? '');
+  const scrollTop = select.scrollTop;
+  select.innerHTML = `<option value="">— select an existing time —</option>${state.values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('')}`;
+  if (state.values.some(value => String(value) === current)) select.value = current;
+  select.scrollTop = scrollTop;
+  status.textContent = state.loading
+    ? `Loaded ${state.values.length}; loading more…`
+    : state.complete ? `${state.values.length} distinct time value(s)`
+      : `${state.values.length} loaded; scroll to load more`;
+}
+
+async function loadTimeValuePage(layer, item, select, status) {
+  let state = filterTimeValueCache.get(item);
+  if (!state || state.source !== layer.source || state.column !== item.column) {
+    state = {source: layer.source, column: item.column, values: [], offset: 0, complete: false, loading: false, pending: null};
+    filterTimeValueCache.set(item, state);
+  }
+  if (state.loading) {
+    await state.pending; renderTimeValueSelect(select, status, item, state); return;
+  }
+  if (state.complete) return;
+  state.loading = true; renderTimeValueSelect(select, status, item, state);
+  state.pending = (async () => {
+    try {
+      const response = await fetch(`/api/sources/${encodeURIComponent(layer.source)}/column-values?column=${encodeURIComponent(item.column)}&offset=${state.offset}&limit=250`);
+      if (!response.ok) { await apiError(response); return; }
+      const result = await response.json();
+      state.values.push(...(result.values ?? []));
+      state.offset = result.next_offset ?? state.offset;
+      state.complete = !result.has_more;
+    } catch (error) {
+      message(`Could not load time values: ${error.message}`, true);
+    } finally {
+      state.loading = false;
+    }
+  })();
+  await state.pending; state.pending = null;
+  renderTimeValueSelect(select, status, item, state);
+}
+
+function filterRow(layer, item, siblings, index) {
+  if (isFilterGroup(item)) return filterGroup(layer, item, siblings, index);
   const div = document.createElement('div');
-  div.className = 'filter';
+  div.className = 'filter-condition';
   const cols = columns(layer.source);
-  div.innerHTML = `<select>${option(cols, item.column)}</select><select>${option(['eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in', 'not_in', 'is_null', 'is_not_null'], item.operator)}</select><input value="${escapeHtml(item.value ?? '')}"><button>×</button>`;
-  const [column, operator, value, remove] = div.children;
-  column.onchange = () => { item.column = column.value; changed(true); };
-  operator.onchange = () => { item.operator = operator.value; changed(true); };
-  value.oninput = () => { item.value = value.value; changed(true); };
-  remove.onclick = () => { layer.filters.splice(layer.filters.indexOf(item), 1); renderLayers(); changed(true); };
+  const controlId = `filter-values-${++filterControlSequence}`;
+  const noValue = ['is_null', 'is_not_null'].includes(item.operator);
+  const between = item.operator === 'between';
+  const isTemporal = temporalColumn(layer.source, item.column);
+  const temporalEquals = isTemporal && item.operator === 'eq';
+  const timeHint = isTemporal ? 'ISO date/time, e.g. 2026-04-01T00:00:00+00:00' : 'Value';
+  const samples = filterSampleCache.get(item)?.values ?? [];
+  const inputs = noValue ? '<span class="filter-no-value">No value needed</span>' : between
+    ? `<span class="filter-range"><input class="filter-value" list="${controlId}" aria-label="Inclusive minimum" placeholder="Minimum · ${timeHint}" value="${escapeHtml(item.value ?? item.min ?? '')}"><input class="filter-value2" list="${controlId}" aria-label="Inclusive maximum" placeholder="Maximum · ${timeHint}" value="${escapeHtml(item.value2 ?? item.max ?? '')}"></span>`
+    : temporalEquals
+      ? `<span class="filter-value-cell"><input class="filter-value" list="${controlId}" placeholder="${escapeHtml(timeHint)}" value="${escapeHtml(item.value ?? '')}"><details class="time-value-picker"><summary>Choose an existing time value</summary><select class="time-value-select" size="8" aria-label="Existing time values"></select><small class="time-value-status">Open to load values</small></details></span>`
+      : `<input class="filter-value" list="${controlId}" placeholder="${escapeHtml(timeHint)}" value="${escapeHtml(item.value ?? '')}">`;
+  const sampleText = samples.length
+    ? `<div class="filter-samples"><small>Min · intermediate values · max</small>${samples.map(value => `<button type="button" class="sample-value" data-value="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join('')}${between ? '<button type="button" class="use-sample-range">Use min–max</button>' : ''}</div>` : '';
+  div.innerHTML = `<div class="filter"><select class="filter-column" aria-label="Filter column">${option(cols, item.column)}</select><select class="filter-operator" aria-label="Filter operator">${filterOperatorOptions(item.operator)}</select>${inputs}<button class="query-filter-values" type="button" title="Read only this column and return min, max, and three values in between">Query 5 values</button><button class="remove" type="button" title="Remove filter">×</button></div><datalist id="${controlId}">${samples.map(value => `<option value="${escapeHtml(value)}"></option>`).join('')}</datalist>${sampleText}`;
+  const column = div.querySelector('.filter-column');
+  const operator = div.querySelector('.filter-operator');
+  const value = div.querySelector('.filter-value');
+  const value2 = div.querySelector('.filter-value2');
+  column.onchange = () => { item.column = column.value; filterSampleCache.delete(item); filterTimeValueCache.delete(item); renderLayers(); changed(true); };
+  operator.onchange = () => {
+    item.operator = operator.value;
+    if (item.operator === 'between') item.value2 ??= '';
+    renderLayers(); changed(true);
+  };
+  if (value) value.oninput = () => { item.value = value.value; delete item.min; changed(true); };
+  if (value2) value2.oninput = () => { item.value2 = value2.value; delete item.max; changed(true); };
+  const timePicker = div.querySelector('.time-value-picker');
+  if (timePicker) {
+    const select = div.querySelector('.time-value-select');
+    const status = div.querySelector('.time-value-status');
+    const state = filterTimeValueCache.get(item);
+    if (state) renderTimeValueSelect(select, status, item, state);
+    timePicker.ontoggle = () => { if (timePicker.open) loadTimeValuePage(layer, item, select, status); };
+    select.onscroll = () => {
+      if (select.scrollTop + select.clientHeight >= select.scrollHeight - 20) {
+        loadTimeValuePage(layer, item, select, status);
+      }
+    };
+    select.onchange = () => {
+      if (!select.value) return;
+      item.value = select.value; value.value = select.value; delete item.min; changed(true);
+    };
+  }
+  div.querySelector('.remove').onclick = () => { siblings.splice(index, 1); renderLayers(); changed(true); };
+  div.querySelector('.query-filter-values').onclick = async event => {
+    const button = event.currentTarget; button.disabled = true; button.textContent = 'Querying…';
+    const response = await fetch(`/api/sources/${encodeURIComponent(layer.source)}/column-excerpt?column=${encodeURIComponent(item.column)}&intermediate=3`);
+    if (!response.ok) { await apiError(response); button.disabled = false; button.textContent = 'Query 5 values'; return; }
+    const result = await response.json(); filterSampleCache.set(item, result); renderLayers();
+    message(`Loaded ${result.values.length} representative value(s) for ${item.column}; only that column was projected.`);
+  };
+  div.querySelectorAll('.sample-value').forEach(button => {
+    button.onclick = () => {
+      item.value = button.dataset.value; delete item.min;
+      renderLayers(); changed(true);
+    };
+  });
+  const useRange = div.querySelector('.use-sample-range');
+  if (useRange) useRange.onclick = () => {
+    item.value = samples[0] ?? ''; item.value2 = samples[samples.length - 1] ?? '';
+    delete item.min; delete item.max;
+    renderLayers(); changed(true);
+  };
+  return div;
+}
+
+function filterGroup(layer, group, siblings, index) {
+  group.filters ??= [];
+  const div = document.createElement('div'); div.className = 'filter-group';
+  div.innerHTML = `<div class="filter-group-head"><strong>Nested group</strong><label>Match<select class="group-logic">${option(['and', 'or'], group.logic ?? 'and')}</select></label><button class="add-condition" type="button">+ condition</button><button class="add-group" type="button">+ nested group</button><button class="remove" type="button">×</button></div><div class="filter-group-items"></div>`;
+  div.querySelector('.group-logic').onchange = event => { group.logic = event.target.value; changed(true); };
+  div.querySelector('.add-condition').onclick = () => { group.filters.push(newFilter(layer)); renderLayers(); changed(true); };
+  div.querySelector('.add-group').onclick = () => { group.filters.push(newFilterGroup(layer)); renderLayers(); changed(true); };
+  div.querySelector('.remove').onclick = () => { siblings.splice(index, 1); renderLayers(); changed(true); };
+  const root = div.querySelector('.filter-group-items');
+  group.filters.forEach((child, childIndex) => root.appendChild(filterRow(layer, child, group.filters, childIndex)));
   return div;
 }
 
@@ -299,7 +432,7 @@ function renderLayers() {
     const groupingText = grouping === 'group_by_dynamic' ? 'group_by_dynamic bins the Time/X column by Every; the function aggregates Y values in each time bin.' : grouping === 'group_by' ? 'group_by uses each distinct X value as a group; the function aggregates Y values within that group.' : 'None plots row-level X and Y values without aggregation.';
     const aggregations = bootstrap.registry.aggregations.filter(value => value !== 'none');
     const groupingOptions = `<option value="none" ${grouping === 'none' ? 'selected' : ''}>none (raw rows)</option><option value="group_by" ${grouping === 'group_by' ? 'selected' : ''}>group_by</option><option value="group_by_dynamic" ${grouping === 'group_by_dynamic' ? 'selected' : ''}>group_by_dynamic</option>`;
-    card.innerHTML = `<div class="layer-head"><input class="enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}><input class="label" value="${escapeHtml(layer.label)}"><button class="remove">×</button></div><div class="grid plot-basics"><label>Source<select class="source-select">${option(names, layer.source)}</select></label><label>Plot type<select class="plot-type">${option(bootstrap.registry.plot_types, layer.plot_type)}</select></label><label>Color${colorPalette(selectedColor)}</label></div><div class="grid axis-columns"><label><span>${xLabel} ${info('X supplies the horizontal values. With group_by it is the grouping key; with group_by_dynamic it must be a Date or Datetime column.')}</span><select class="x-column">${option(cols, layer.x_column, true)}</select></label><label><span>Y/value column ${info('The selected aggregation function is applied to this column. count and relative_count count rows and therefore ignore Y.')}</span><select class="y-column">${option(cols, layer.y_column, true)}</select></label></div><div class="grouping-panel"><div class="grid grouping-grid"><label><span>Grouping method ${info('none plots raw rows; group_by combines equal X values; group_by_dynamic creates regular time bins from the Time/X column.')}</span><select class="grouping-method">${groupingOptions}</select></label><label class="time-every" ${grouping === 'group_by_dynamic' ? '' : 'hidden'}><span>Every ${info('Width of each time bin, for example 1s, 1m, 5m, 1h, 1d, 1w, or 1mo.')}</span><input class="time-bin" list="time-bins" placeholder="1m" value="${escapeHtml(layer.time_bin ?? '1m')}"></label><label><span>Aggregate Y with ${info('The function is applied to Y inside every X group or time bin. count and relative_count operate on rows instead.')}</span><select class="aggregation" ${grouping === 'none' ? 'disabled' : ''}>${option(aggregations, layer.aggregation === 'none' ? 'sum' : layer.aggregation)}</select></label></div><small>${groupingText}</small></div><div class="grid"><label><span>Split series by / color ${info('Optional categorical column. Each distinct value becomes a separate plotted series and legend entry; when aggregating, it is an additional grouping key.')}</span><select class="group-column">${option(cols, layer.group_column, true)}</select></label><label>Sort<select class="sort">${option(['none', 'x_ascending', 'x_descending', 'y_ascending', 'y_descending'], layer.sort)}</select></label><label>Input row limit<input class="limit" type="number" min="1" value="${layer.limit ?? ''}"></label><label><span>Result limit ${info('Applied after filtering, aggregation, and sorting. Use this for ranked top-N plots; Input row limit instead bounds raw data loading.')}</span><input class="result-limit" type="number" min="1" value="${layer.result_limit ?? ''}"></label><label>Result Y min<input class="result-y-min" type="number" step="any" value="${layer.result_y_min ?? ''}"></label><label>Result Y max<input class="result-y-max" type="number" step="any" value="${layer.result_y_max ?? ''}"></label><label>Filter logic<select class="filter-logic">${option(['and', 'or'], layer.filter_logic)}</select></label><label>Opacity<input class="alpha" type="number" min="0" max="1" step="0.05" value="${layer.style.alpha ?? 1}"></label><label>Marker<select class="marker">${option(['none', 'o', 's', '^', 'v', 'D', 'x', '+', '*'], layer.style.marker ?? 'none')}</select></label><label>Line width<input class="linewidth" type="number" step=".1" value="${layer.style.linewidth ?? 1.5}"></label></div><div class="checks"><label><input class="stacked" type="checkbox" ${layer.stacked ? 'checked' : ''}> Stacked</label><label><input class="secondary" type="checkbox" ${layer.secondary_y ? 'checked' : ''}> Secondary y</label><label><input class="fix-x-values" type="checkbox" ${layer.fix_x_values ? 'checked' : ''}> Fix shared X values from this layer ${info('This layer defines the ordered X domain after its filters, aggregation, sorting, and result limit. Every other layer is filtered and aligned to that domain.')}</label></div><label><span>Aggregation options (JSON) ${info('Only quantile and relative_count need built-in options. See the examples below and the README for the complete list.')}</span><textarea class="aggregation-options">${escapeHtml(JSON.stringify(layer.aggregation_options))}</textarea></label><small>Examples: {"quantile":0.95} or {"scale":"percent"} for relative_count.</small><label><span>Plot options (JSON) ${info('Renderer-specific settings. Styling such as color, opacity, marker, and line width uses the controls above.')}</span><textarea class="plot-options">${escapeHtml(JSON.stringify(layer.options))}</textarea></label><small>Examples: histogram {"bins":50,"density":true}; step {"where":"pre"}; hexbin {"gridsize":40}.</small><div class="filters"></div><button class="add-filter">Add filter</button>`;
+    card.innerHTML = `<div class="layer-head"><input class="enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}><input class="label" value="${escapeHtml(layer.label)}"><button class="remove">×</button></div><div class="grid plot-basics"><label>Source<select class="source-select">${option(names, layer.source)}</select></label><label>Plot type<select class="plot-type">${option(bootstrap.registry.plot_types, layer.plot_type)}</select></label><label>Color${colorPalette(selectedColor)}</label></div><div class="grid axis-columns"><label><span>${xLabel} ${info('X supplies the horizontal values. With group_by it is the grouping key; with group_by_dynamic it must be a Date or Datetime column.')}</span><select class="x-column">${option(cols, layer.x_column, true)}</select></label><label><span>Y/value column ${info('The selected aggregation function is applied to this column. count and relative_count count rows and therefore ignore Y.')}</span><select class="y-column">${option(cols, layer.y_column, true)}</select></label></div><div class="grouping-panel"><div class="grid grouping-grid"><label><span>Grouping method ${info('none plots raw rows; group_by combines equal X values; group_by_dynamic creates regular time bins from the Time/X column.')}</span><select class="grouping-method">${groupingOptions}</select></label><label class="time-every" ${grouping === 'group_by_dynamic' ? '' : 'hidden'}><span>Every ${info('Width of each time bin, for example 1s, 1m, 5m, 1h, 1d, 1w, or 1mo.')}</span><input class="time-bin" list="time-bins" placeholder="1m" value="${escapeHtml(layer.time_bin ?? '1m')}"></label><label><span>Aggregate Y with ${info('The function is applied to Y inside every X group or time bin. count and relative_count operate on rows instead.')}</span><select class="aggregation" ${grouping === 'none' ? 'disabled' : ''}>${option(aggregations, layer.aggregation === 'none' ? 'sum' : layer.aggregation)}</select></label></div><small>${groupingText}</small></div><div class="grid"><label><span>Split series by / color ${info('Optional categorical column. Each distinct value becomes a separate plotted series and legend entry; when aggregating, it is an additional grouping key.')}</span><select class="group-column">${option(cols, layer.group_column, true)}</select></label><label>Sort<select class="sort">${option(['none', 'x_ascending', 'x_descending', 'y_ascending', 'y_descending'], layer.sort)}</select></label><label>Input row limit<input class="limit" type="number" min="1" value="${layer.limit ?? ''}"></label><label><span>Result limit ${info('Applied after filtering, aggregation, and sorting. Use this for ranked top-N plots; Input row limit instead bounds raw data loading.')}</span><input class="result-limit" type="number" min="1" value="${layer.result_limit ?? ''}"></label><label>Result Y min<input class="result-y-min" type="number" step="any" value="${layer.result_y_min ?? ''}"></label><label>Result Y max<input class="result-y-max" type="number" step="any" value="${layer.result_y_max ?? ''}"></label><label>Opacity<input class="alpha" type="number" min="0" max="1" step="0.05" value="${layer.style.alpha ?? 1}"></label><label>Marker<select class="marker">${option(['none', 'o', 's', '^', 'v', 'D', 'x', '+', '*'], layer.style.marker ?? 'none')}</select></label><label>Line width<input class="linewidth" type="number" step=".1" value="${layer.style.linewidth ?? 1.5}"></label></div><div class="checks"><label><input class="stacked" type="checkbox" ${layer.stacked ? 'checked' : ''}> Stacked</label><label><input class="secondary" type="checkbox" ${layer.secondary_y ? 'checked' : ''}> Secondary y</label><label><input class="fix-x-values" type="checkbox" ${layer.fix_x_values ? 'checked' : ''}> Fix shared X values from this layer ${info('This layer defines the ordered X domain after its filters, aggregation, sorting, and result limit. Every other layer is filtered and aligned to that domain.')}</label></div><label><span>Aggregation options (JSON) ${info('Only quantile and relative_count need built-in options. See the examples below and the README for the complete list.')}</span><textarea class="aggregation-options">${escapeHtml(JSON.stringify(layer.aggregation_options))}</textarea></label><small>Examples: {"quantile":0.95} or {"scale":"percent"} for relative_count.</small><label><span>Plot options (JSON) ${info('Renderer-specific settings. Styling such as color, opacity, marker, and line width uses the controls above.')}</span><textarea class="plot-options">${escapeHtml(JSON.stringify(layer.options))}</textarea></label><small>Examples: histogram {"bins":50,"density":true}; step {"where":"pre"}; hexbin {"gridsize":40}.</small><div class="filter-editor"><div class="filter-editor-head"><strong>Filters</strong>${info('The root combines its conditions and nested groups. Every nested group can independently use AND or OR.') }<label>Root match<select class="filter-logic">${option(['and', 'or'], layer.filter_logic)}</select></label><button class="add-filter" type="button">+ condition</button><button class="add-filter-group" type="button">+ nested group</button></div><div class="filters"></div></div>`;
     const q = selector => card.querySelector(selector);
     q('.enabled').onchange = event => { layer.enabled = event.target.checked; renderStages(); changed(true); };
     q('.label').oninput = event => { layer.label = event.target.value; changed(false); };
@@ -359,9 +492,13 @@ function renderLayers() {
       catch { message('Invalid plot options JSON', true); }
     };
     const filters = q('.filters');
-    for (const item of layer.filters) filters.appendChild(filterRow(layer, item));
+    layer.filters.forEach((item, filterIndex) => filters.appendChild(filterRow(layer, item, layer.filters, filterIndex)));
     q('.add-filter').onclick = () => {
-      layer.filters.push({column: cols[0] ?? '', operator: 'eq', value: ''});
+      layer.filters.push(newFilter(layer));
+      renderLayers(); changed(true);
+    };
+    q('.add-filter-group').onclick = () => {
+      layer.filters.push(newFilterGroup(layer));
       renderLayers(); changed(true);
     };
     $('layers').appendChild(card);
@@ -497,11 +634,17 @@ function collect() {
   result.figure = {width: Number($('width').value), height: Number($('height').value), dpi: 150, font_family: $('mono').checked ? 'monospace' : 'default', font_size: Number($('font-size').value)};
   result.axes = {
     xlabel: $('xlabel').value, ylabel: $('ylabel').value, secondary_ylabel: $('secondary-ylabel').value,
-    xscale: $('xscale').value, yscale: $('yscale').value, secondary_yscale: 'linear',
-    xmin: numberValue('xmin'), xmax: numberValue('xmax'), ymin: numberValue('ymin'), ymax: numberValue('ymax'),
-    secondary_ymin: null, secondary_ymax: null, x_grid: $('x-grid').checked, y_grid: $('y-grid').checked,
+    xscale: $('xscale').value, yscale: $('yscale').value, secondary_yscale: $('secondary-yscale').value,
+    xmin: scalarValue('xmin'), xmax: scalarValue('xmax'), ymin: numberValue('ymin'), ymax: numberValue('ymax'),
+    secondary_ymin: numberValue('secondary-ymin'), secondary_ymax: numberValue('secondary-ymax'), x_grid: $('x-grid').checked, y_grid: $('y-grid').checked,
     secondary_y_grid: $('secondary-grid').checked, grid_alpha: Number($('grid-opacity').value), major_x_ticks: $('major-x').checked,
     minor_x_ticks: $('minor-x').checked, custom_x_ticks: csvNumbers('xticks'), custom_x_tick_labels: csvText('xtick-labels'),
+    custom_y_ticks: csvNumbers('yticks'), custom_y_tick_labels: csvText('ytick-labels'),
+    y_tick_min: numberValue('y-tick-min'), y_tick_max: numberValue('y-tick-max'),
+    y_tick_step: numberValue('y-tick-step'),
+    custom_secondary_y_ticks: csvNumbers('secondary-yticks'), custom_secondary_y_tick_labels: csvText('secondary-ytick-labels'),
+    secondary_y_tick_min: numberValue('secondary-y-tick-min'), secondary_y_tick_max: numberValue('secondary-y-tick-max'),
+    secondary_y_tick_step: numberValue('secondary-y-tick-step'),
     x_value_ticks: $('x-value-ticks').checked,
     x_value_tick_interval: Number($('x-value-tick-interval').value),
     x_datetime_format: $('x-datetime-format').value,
@@ -517,6 +660,8 @@ function collect() {
     bbox_enabled: $('legend-bbox-enabled').checked,
     bbox_x: Number($('legend-bbox-x').value), bbox_y: Number($('legend-bbox-y').value),
     handlelength: Number($('legend-handlelength').value),
+    columnspacing: Number($('legend-columnspacing').value),
+    handletextpad: Number($('legend-handletextpad').value),
     opacity: Number($('legend-opacity').value),
     font_size_override: $('legend-font-override').checked,
     font_size: Number($('legend-font-size').value),
@@ -546,34 +691,46 @@ function apply(next) {
   config = structuredClone(next); ensureConfig();
   $('config-module').value = config.config_module ?? bootstrap.config_module ?? '';
   $('filename').value = config.filename ?? 'explorative-plot';
-  $('width').value = config.figure.width ?? 8; $('height').value = config.figure.height ?? 4.5;
-  $('font-size').value = config.figure.font_size ?? 10; $('mono').checked = config.figure.font_family === 'monospace';
+  $('width').value = config.figure.width ?? 5.6; $('height').value = config.figure.height ?? 2.8;
+  $('font-size').value = config.figure.font_size ?? 12; $('mono').checked = config.figure.font_family === 'monospace';
   const axes = config.axes;
   $('xlabel').value = axes.xlabel ?? ''; $('ylabel').value = axes.ylabel ?? '';
   $('secondary-ylabel').value = axes.secondary_ylabel ?? ''; $('xscale').value = axes.xscale ?? 'linear';
   $('yscale').value = axes.yscale ?? 'linear';
+  $('secondary-yscale').value = axes.secondary_yscale ?? 'linear';
   for (const id of ['xmin', 'xmax', 'ymin', 'ymax']) $(id).value = axes[id] ?? '';
+  $('secondary-ymin').value = axes.secondary_ymin ?? ''; $('secondary-ymax').value = axes.secondary_ymax ?? '';
   $('x-grid').checked = axes.x_grid ?? false; $('y-grid').checked = axes.y_grid ?? true;
   $('secondary-grid').checked = axes.secondary_y_grid ?? false; $('major-x').checked = axes.major_x_ticks ?? true;
   $('grid-opacity').value = axes.grid_alpha ?? 0.5;
   $('minor-x').checked = axes.minor_x_ticks ?? false; $('x-engineering').checked = axes.x_engineering ?? false;
   $('y-engineering').checked = axes.y_engineering ?? false; $('secondary-y-engineering').checked = axes.secondary_y_engineering ?? false;
   $('label-font-override').checked = axes.label_font_size_override ?? false;
-  $('label-font-size').value = axes.label_font_size ?? config.figure.font_size ?? 10;
+  $('label-font-size').value = axes.label_font_size ?? config.figure.font_size ?? 12;
   $('tick-font-override').checked = axes.tick_font_size_override ?? false;
-  $('tick-font-size').value = axes.tick_font_size ?? config.figure.font_size ?? 10;
+  $('tick-font-size').value = axes.tick_font_size ?? config.figure.font_size ?? 12;
   $('legend-font-override').checked = config.legend.font_size_override ?? false;
-  $('legend-font-size').value = config.legend.font_size ?? config.figure.font_size ?? 10;
-  $('legend-loc').value = config.legend.loc ?? 'best';
+  $('legend-font-size').value = config.legend.font_size ?? config.figure.font_size ?? 12;
+  $('legend-loc').value = config.legend.loc ?? 'upper left';
   $('legend-ncols').value = config.legend.ncols ?? 1;
   $('legend-bbox-enabled').checked = config.legend.bbox_enabled ?? false;
-  $('legend-bbox-x').value = config.legend.bbox_x ?? 1;
+  $('legend-bbox-x').value = config.legend.bbox_x ?? 0.115;
   $('legend-bbox-y').value = config.legend.bbox_y ?? 1;
-  $('legend-handlelength').value = config.legend.handlelength ?? 2;
+  $('legend-handlelength').value = config.legend.handlelength ?? 1.5;
+  $('legend-columnspacing').value = config.legend.columnspacing ?? 0.8;
+  $('legend-handletextpad').value = config.legend.handletextpad ?? 0.5;
   $('legend-opacity').value = config.legend.opacity ?? 0.8;
   $('broken-y-enabled').checked = config.broken_y_axis.enabled ?? false;
   $('broken-y-gap').value = config.broken_y_axis.gap ?? 0.1;
   $('xticks').value = (axes.custom_x_ticks ?? []).join(', '); $('xtick-labels').value = (axes.custom_x_tick_labels ?? []).join(', ');
+  $('yticks').value = (axes.custom_y_ticks ?? []).join(', '); $('ytick-labels').value = (axes.custom_y_tick_labels ?? []).join(', ');
+  $('y-tick-min').value = axes.y_tick_min ?? ''; $('y-tick-max').value = axes.y_tick_max ?? '';
+  $('y-tick-step').value = axes.y_tick_step ?? '';
+  $('secondary-yticks').value = (axes.custom_secondary_y_ticks ?? []).join(', ');
+  $('secondary-ytick-labels').value = (axes.custom_secondary_y_tick_labels ?? []).join(', ');
+  $('secondary-y-tick-min').value = axes.secondary_y_tick_min ?? '';
+  $('secondary-y-tick-max').value = axes.secondary_y_tick_max ?? '';
+  $('secondary-y-tick-step').value = axes.secondary_y_tick_step ?? '';
   $('x-value-ticks').checked = axes.x_value_ticks ?? false;
   $('x-value-tick-interval').value = axes.x_value_tick_interval ?? 1;
   $('x-datetime-format').value = axes.x_datetime_format ?? '';
@@ -639,8 +796,8 @@ async function post(path, download = false, live = false) {
 }
 
 function bindPresentationControls() {
-  const inputIds = ['width', 'height', 'font-size', 'xlabel', 'ylabel', 'secondary-ylabel', 'xmin', 'xmax', 'ymin', 'ymax', 'xticks', 'xtick-labels', 'x-value-tick-interval', 'x-datetime-format', 'rotation', 'grid-opacity', 'label-font-size', 'tick-font-size', 'legend-font-size', 'legend-ncols', 'legend-bbox-x', 'legend-bbox-y', 'legend-handlelength', 'legend-opacity', 'broken-y-gap'];
-  const changeIds = ['xscale', 'yscale', 'tick-ha', 'tick-va', 'major-x', 'minor-x', 'x-engineering', 'y-engineering', 'secondary-y-engineering', 'x-grid', 'y-grid', 'secondary-grid', 'legend', 'legend-loc', 'mono'];
+  const inputIds = ['width', 'height', 'font-size', 'xlabel', 'ylabel', 'secondary-ylabel', 'xmin', 'xmax', 'ymin', 'ymax', 'secondary-ymin', 'secondary-ymax', 'xticks', 'xtick-labels', 'yticks', 'ytick-labels', 'y-tick-min', 'y-tick-max', 'y-tick-step', 'secondary-yticks', 'secondary-ytick-labels', 'secondary-y-tick-min', 'secondary-y-tick-max', 'secondary-y-tick-step', 'x-value-tick-interval', 'x-datetime-format', 'rotation', 'grid-opacity', 'label-font-size', 'tick-font-size', 'legend-font-size', 'legend-ncols', 'legend-bbox-x', 'legend-bbox-y', 'legend-handlelength', 'legend-columnspacing', 'legend-handletextpad', 'legend-opacity', 'broken-y-gap'];
+  const changeIds = ['xscale', 'yscale', 'secondary-yscale', 'tick-ha', 'tick-va', 'major-x', 'minor-x', 'x-engineering', 'y-engineering', 'secondary-y-engineering', 'x-grid', 'y-grid', 'secondary-grid', 'legend', 'legend-loc', 'mono'];
   for (const id of inputIds) $(id).oninput = () => changed(false);
   for (const id of changeIds) $(id).onchange = () => changed(false);
   for (const id of ['label-font-override', 'tick-font-override', 'legend-font-override']) {
@@ -768,7 +925,7 @@ $('load-config').onchange = async event => {
     if (layer.x_column && !layerColumns.has(layer.x_column)) invalid.push(`missing X column ${layer.x_column}`);
     if (layer.y_column && !layerColumns.has(layer.y_column)) invalid.push(`missing Y column ${layer.y_column}`);
     if (layer.group_column && !layerColumns.has(layer.group_column)) invalid.push(`missing split column ${layer.group_column}`);
-    for (const filter of [...(layer.required_filters ?? []), ...(layer.filters ?? [])]) {
+    for (const filter of filterConditions([...(layer.required_filters ?? []), ...(layer.filters ?? [])])) {
       if (filter?.column && !layerColumns.has(filter.column)) invalid.push(`missing filter column ${filter.column}`);
     }
     if (invalid.length) {

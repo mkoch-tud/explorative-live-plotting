@@ -6,6 +6,7 @@ from datetime import date, datetime
 import math
 import re
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import polars as pl
 
@@ -15,10 +16,22 @@ from .errors import ConfigurationError
 from .logging import log
 from .registry import Registry
 
-OPERATORS = {"eq", "ne", "gt", "ge", "lt", "le", "in", "not_in", "is_null", "is_not_null"}
+OPERATORS = {
+    "eq",
+    "ne",
+    "gt",
+    "ge",
+    "lt",
+    "le",
+    "between",
+    "in",
+    "not_in",
+    "is_null",
+    "is_not_null",
+}
 TIME_BIN = re.compile(r"[1-9]\d*(?:ns|us|ms|s|m|h|d|w|mo|q|y)")
 MAX_PLOT_ROWS = 1_000_000
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 6
 QUERY_FIELDS = (
     "source",
     "x_column",
@@ -57,14 +70,39 @@ def _coerce(value: Any, dtype: pl.DataType, field: str) -> Any:
             return lowered in {"true", "1"}
         if dtype == pl.Date:
             return date.fromisoformat(str(value))
-        if dtype == pl.Datetime:
-            return datetime.fromisoformat(str(value))
+        if isinstance(dtype, pl.Datetime):
+            parsed = datetime.fromisoformat(str(value))
+            if dtype.time_zone:
+                zone = ZoneInfo(dtype.time_zone)
+                return (
+                    parsed.replace(tzinfo=zone)
+                    if parsed.tzinfo is None
+                    else parsed.astimezone(zone)
+                )
+            return parsed.replace(tzinfo=None)
         return str(value)
     except (TypeError, ValueError) as error:
         raise ConfigurationError(f"{field} is incompatible with {dtype}: {value}") from error
 
 
 def _filter_expression(item: dict[str, Any], schema: pl.Schema) -> pl.Expr:
+    if item.get("type") == "group":
+        logic = item.get("logic", "and")
+        if logic not in {"and", "or"}:
+            raise ConfigurationError("nested filter group logic must be `and` or `or`")
+        children = item.get("filters")
+        if not isinstance(children, list) or not children:
+            raise ConfigurationError("nested filter groups must contain at least one filter")
+        expressions = []
+        for child in children:
+            if not isinstance(child, dict):
+                raise ConfigurationError("each nested filter must be an object")
+            expressions.append(_filter_expression(child, schema))
+        return (
+            pl.all_horizontal(expressions)
+            if logic == "and"
+            else pl.any_horizontal(expressions)
+        )
     column = item.get("column")
     operator = item.get("operator", "eq")
     if column not in schema:
@@ -82,6 +120,16 @@ def _filter_expression(item: dict[str, Any], schema: pl.Schema) -> pl.Expr:
         converted = [_coerce(value, schema[column], f"filter {column}") for value in values]
         result = expression.is_in(converted)
         return ~result if operator == "not_in" else result
+    if operator == "between":
+        lower_raw = item.get("min", item.get("value"))
+        upper_raw = item.get("max", item.get("value2"))
+        lower = _coerce(lower_raw, schema[column], f"filter {column} minimum")
+        upper = _coerce(upper_raw, schema[column], f"filter {column} maximum")
+        if lower > upper:
+            raise ConfigurationError(
+                f"filter {column} minimum cannot be greater than its maximum"
+            )
+        return expression.is_between(lower, upper, closed="both")
     value = _coerce(raw, schema[column], f"filter {column}")
     return {
         "eq": expression == value,

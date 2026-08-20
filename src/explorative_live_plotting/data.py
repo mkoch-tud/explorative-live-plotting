@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import date, datetime
 import glob
 import hashlib
 import importlib
@@ -178,6 +179,107 @@ class DataCatalog:
 
     def all_metadata(self) -> list[dict[str, Any]]:
         return [self.metadata(item["name"]) for item in self.specs()]
+
+    def column_excerpt(
+        self, name: str, column: str, intermediate: int = 3
+    ) -> dict[str, Any]:
+        """Return min/max and a few ordered interior values without collecting the column."""
+        schema = self.schema(name)
+        if column not in schema:
+            raise ConfigurationError(f"column does not exist in {name}: {column}")
+        if not 0 <= intermediate <= 18:
+            raise ConfigurationError("intermediate value count must be between 0 and 18")
+        dtype = schema[column]
+        desired = intermediate + 2
+        projected = self.lazy(name).select(column).drop_nulls()
+        if dtype.is_numeric() or dtype == pl.Date or isinstance(dtype, pl.Datetime):
+            expressions = [pl.col(column).min().alias("_value_0")]
+            expressions.extend(
+                pl.col(column)
+                .quantile(index / (intermediate + 1), interpolation="nearest")
+                .alias(f"_value_{index}")
+                for index in range(1, intermediate + 1)
+            )
+            expressions.append(pl.col(column).max().alias(f"_value_{desired - 1}"))
+            row = projected.select(expressions).collect(engine="streaming").row(0)
+            values = [self._excerpt_scalar(value, dtype) for value in row if value is not None]
+        else:
+            count = projected.select(pl.col(column).n_unique().alias("_count")).collect(
+                engine="streaming"
+            )[0, "_count"]
+            if not count:
+                values = []
+            else:
+                positions = sorted(
+                    {round(index * (count - 1) / (desired - 1)) for index in range(desired)}
+                )
+                frame = (
+                    projected.unique()
+                    .sort(column)
+                    .with_row_index("_position")
+                    .filter(pl.col("_position").is_in(positions))
+                    .select(column)
+                    .collect(engine="streaming")
+                )
+                values = [self._excerpt_scalar(value, dtype) for value in frame[column]]
+        # Quantiles can coincide in low-cardinality columns. Preserve order while
+        # avoiding repeated suggestions in the browser.
+        unique_values = []
+        for value in values:
+            if value not in unique_values:
+                unique_values.append(value)
+        return {"source": name, "column": column, "dtype": str(dtype), "values": unique_values}
+
+    def column_values(
+        self, name: str, column: str, offset: int = 0, limit: int = 250
+    ) -> dict[str, Any]:
+        """Return one ordered page of distinct values from a projected column."""
+        schema = self.schema(name)
+        if column not in schema:
+            raise ConfigurationError(f"column does not exist in {name}: {column}")
+        dtype = schema[column]
+        if dtype != pl.Date and not isinstance(dtype, pl.Datetime):
+            raise ConfigurationError("the time-value picker requires a Date or Datetime column")
+        if offset < 0:
+            raise ConfigurationError("column-value offset must be zero or greater")
+        if not 1 <= limit <= 1000:
+            raise ConfigurationError("column-value page size must be between 1 and 1000")
+        frame = (
+            self.lazy(name)
+            .select(column)
+            .drop_nulls()
+            .unique()
+            .sort(column)
+            .slice(offset, limit + 1)
+            .collect(engine="streaming")
+        )
+        has_more = frame.height > limit
+        values = [self._excerpt_scalar(value, dtype) for value in frame[column].head(limit)]
+        return {
+            "source": name,
+            "column": column,
+            "dtype": str(dtype),
+            "values": values,
+            "offset": offset,
+            "next_offset": offset + len(values) if has_more else None,
+            "has_more": has_more,
+        }
+
+    @staticmethod
+    def _excerpt_scalar(value: Any, dtype: pl.DataType) -> Any:
+        if dtype == pl.Date:
+            if isinstance(value, datetime):
+                value = value.date()
+            return value.isoformat() if isinstance(value, date) else str(value)
+        if isinstance(dtype, pl.Datetime):
+            return value.isoformat() if isinstance(value, datetime) else str(value)
+        if dtype.is_integer():
+            return int(value)
+        if dtype.is_float() or dtype == pl.Decimal:
+            return float(value)
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        return value
 
     def fingerprint(self, name: str) -> str:
         spec = self.get(name)

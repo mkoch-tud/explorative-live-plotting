@@ -6,6 +6,7 @@ from datetime import date, datetime
 import math
 from pprint import pformat
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import polars as pl
 
@@ -33,14 +34,26 @@ def _coerce(value: Any, dtype: pl.DataType, field: str) -> Any:
             return lowered in {"true", "1"}
         if dtype == pl.Date:
             return date.fromisoformat(str(value))
-        if dtype == pl.Datetime:
-            return datetime.fromisoformat(str(value))
+        if isinstance(dtype, pl.Datetime):
+            parsed = datetime.fromisoformat(str(value))
+            if dtype.time_zone:
+                zone = ZoneInfo(dtype.time_zone)
+                return (
+                    parsed.replace(tzinfo=zone)
+                    if parsed.tzinfo is None
+                    else parsed.astimezone(zone)
+                )
+            return parsed.replace(tzinfo=None)
         return str(value)
     except (TypeError, ValueError) as error:
         raise ConfigurationError(f"{field} is incompatible with {dtype}: {value}") from error
 
 
 def _filter_code(item: dict[str, Any], schema: pl.Schema) -> str:
+    if item.get("type") == "group":
+        children = [_filter_code(child, schema) for child in item["filters"]]
+        combiner = "all_horizontal" if item.get("logic", "and") == "and" else "any_horizontal"
+        return f"pl.{combiner}([{', '.join(children)}])"
     column = item["column"]
     operator = item.get("operator", "eq")
     expression = f"pl.col({column!r})"
@@ -54,6 +67,14 @@ def _filter_code(item: dict[str, Any], schema: pl.Schema) -> str:
         converted = [_coerce(value, schema[column], f"filter {column}") for value in values]
         code = f"{expression}.is_in({converted!r})"
         return f"~({code})" if operator == "not_in" else code
+    if operator == "between":
+        lower = _coerce(
+            item.get("min", item.get("value")), schema[column], f"filter {column} minimum"
+        )
+        upper = _coerce(
+            item.get("max", item.get("value2")), schema[column], f"filter {column} maximum"
+        )
+        return f"{expression}.is_between({lower!r}, {upper!r}, closed='both')"
     value = _coerce(raw, schema[column], f"filter {column}")
     symbol = {"eq": "==", "ne": "!=", "gt": ">", "ge": ">=", "lt": "<", "le": "<="}[
         operator
@@ -344,10 +365,41 @@ def _plot_style(style):
 
 
 def _limits(ax, lower, upper, axis):
-    if (lower is None) != (upper is None):
-        raise ValueError(f"both {axis} limits must be supplied")
-    if lower is not None:
-        getattr(ax, f"set_{axis}lim")(lower, upper)
+    if lower is None and upper is None:
+        return
+    current_lower, current_upper = getattr(ax, f"get_{axis}lim")()
+    getattr(ax, f"set_{axis}lim")(
+        current_lower if lower is None else lower,
+        current_upper if upper is None else upper,
+    )
+
+
+def _x_limit_value(value, x_values):
+    if value is None or isinstance(value, (datetime.date, datetime.datetime)):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    sample = next((item for item in x_values if item is not None), None)
+    if isinstance(sample, datetime.datetime):
+        try:
+            return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(f"invalid date/time X limit: {value!r}") from error
+    if isinstance(sample, datetime.date):
+        try:
+            return datetime.date.fromisoformat(str(value))
+        except ValueError as error:
+            raise ValueError(f"invalid date X limit: {value!r}") from error
+    if isinstance(sample, str):
+        text = str(value)
+        values = list(dict.fromkeys(str(item) for item in x_values if item is not None))
+        if text not in values:
+            raise ValueError(f"X limit {value!r} is not present in the X values")
+        return float(values.index(text))
+    try:
+        return float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"X limit must be numeric: {value!r}") from error
 
 
 def _grid(ax, enabled, axis, alpha):
@@ -535,6 +587,27 @@ def _ticks(ax, axes, time_binned=False, x_values=None):
     )
 
 
+def _y_ticks(ax, axes, secondary=False):
+    prefix = "secondary_" if secondary else ""
+    tick_key = "custom_secondary_y_ticks" if secondary else "custom_y_ticks"
+    label_key = (
+        "custom_secondary_y_tick_labels" if secondary else "custom_y_tick_labels"
+    )
+    ticks = axes.get(tick_key, [])
+    labels = axes.get(label_key, [])
+    if not ticks and axes.get(f"{prefix}y_tick_min") is not None:
+        lower = float(axes[f"{prefix}y_tick_min"])
+        upper = float(axes[f"{prefix}y_tick_max"])
+        step = float(axes[f"{prefix}y_tick_step"])
+        count = int((upper - lower) / step + 1e-12) + 1
+        ticks = [lower + index * step for index in range(count)]
+    if not ticks:
+        return
+    ax.yaxis.set_major_locator(mticker.FixedLocator(ticks))
+    if labels:
+        ax.yaxis.set_major_formatter(mticker.FixedFormatter(labels))
+
+
 def _broken_axis_marks(axes):
     size = 0.012
     style = {"color": "black", "clip_on": False, "linewidth": 0.8}
@@ -627,6 +700,7 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
         "import os",
         "import re",
         "import sys",
+        "import zoneinfo",
         "import matplotlib as mpl",
         'mpl.use("Agg")',
         'mpl.rcParams["pdf.fonttype"] = 42',
@@ -698,6 +772,8 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
         f"loc={config['legend']['loc']!r}, ncols={int(config['legend']['ncols'])!r}, "
         f"fontsize={legend_font_size!r}, "
         f"handlelength={float(config['legend']['handlelength'])!r}, "
+        f"columnspacing={float(config['legend']['columnspacing'])!r}, "
+        f"handletextpad={float(config['legend']['handletextpad'])!r}, "
         f"framealpha={float(config['legend']['opacity'])!r}"
     )
     if config["legend"]["bbox_enabled"]:
@@ -787,9 +863,11 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
             "    if secondary is not None:",
             "        secondary.set_ylabel(str(axes['secondary_ylabel']).replace('\\\\n', "
             f"'\\n'), fontsize={label_font_size!r})",
+            f"    x_axis_values = {x_values_code}",
+            "    xmin = _x_limit_value(axes['xmin'], x_axis_values)",
+            "    xmax = _x_limit_value(axes['xmax'], x_axis_values)",
             "    if axes['xmin'] is None and axes['xmax'] is None:",
-            f"        _automatic_x_limits(primary, {x_values_code}, {time_bins!r})",
-            "    _limits(primary, axes['xmin'], axes['xmax'], 'x')",
+            f"        _automatic_x_limits(primary, x_axis_values, {time_bins!r})",
         ]
     )
     if broken_y["enabled"]:
@@ -807,12 +885,17 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
         [
             "    if secondary is not None:",
             "        _limits(secondary, axes['secondary_ymin'], axes['secondary_ymax'], 'y')",
-            f"    _ticks(primary, axes, {time_axis!r}, {x_values_code})",
+            f"    _ticks(primary, axes, {time_axis!r}, x_axis_values)",
+            "    _limits(primary, xmin, xmax, 'x')",
             "    if axes['y_engineering']:",
             "        for plot_axis in primary_axes:",
             "            plot_axis.yaxis.set_major_formatter(mticker.EngFormatter(sep=''))",
+            "    for plot_axis in primary_axes:",
+            "        _y_ticks(plot_axis, axes)",
             "    if secondary is not None and axes['secondary_y_engineering']:",
             "        secondary.yaxis.set_major_formatter(mticker.EngFormatter(sep=''))",
+            "    if secondary is not None:",
+            "        _y_ticks(secondary, axes, secondary=True)",
             "    for plot_axis in primary_axes:",
             "        plot_axis.tick_params(axis='both', which='both', "
             f"labelsize={tick_font_size!r})",

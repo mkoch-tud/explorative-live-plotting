@@ -16,6 +16,8 @@ import matplotlib as mpl
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import polars as pl
 
 from .errors import ConfigurationError
@@ -48,11 +50,11 @@ def default_config(config_module: str | None = None) -> dict[str, Any]:
         "filename": "explorative-plot",
         "sources": [],
         "figure": {
-            "width": 8.0,
-            "height": 4.5,
+            "width": 5.6,
+            "height": 2.8,
             "dpi": 150,
             "font_family": "default",
-            "font_size": 10.0,
+            "font_size": 12.0,
         },
         "axes": {
             "xlabel": "",
@@ -75,6 +77,16 @@ def default_config(config_module: str | None = None) -> dict[str, Any]:
             "minor_x_ticks": False,
             "custom_x_ticks": [],
             "custom_x_tick_labels": [],
+            "custom_y_ticks": [],
+            "custom_y_tick_labels": [],
+            "y_tick_min": None,
+            "y_tick_max": None,
+            "y_tick_step": None,
+            "custom_secondary_y_ticks": [],
+            "custom_secondary_y_tick_labels": [],
+            "secondary_y_tick_min": None,
+            "secondary_y_tick_max": None,
+            "secondary_y_tick_step": None,
             "x_value_ticks": False,
             "x_value_tick_interval": 1,
             "x_datetime_format": "",
@@ -85,21 +97,23 @@ def default_config(config_module: str | None = None) -> dict[str, Any]:
             "y_engineering": False,
             "secondary_y_engineering": False,
             "label_font_size_override": False,
-            "label_font_size": 10.0,
+            "label_font_size": 12.0,
             "tick_font_size_override": False,
-            "tick_font_size": 10.0,
+            "tick_font_size": 12.0,
         },
         "legend": {
             "enabled": True,
-            "loc": "best",
+            "loc": "upper left",
             "ncols": 1,
             "bbox_enabled": False,
-            "bbox_x": 1.0,
+            "bbox_x": 0.115,
             "bbox_y": 1.0,
-            "handlelength": 2.0,
+            "handlelength": 1.5,
+            "columnspacing": 0.8,
+            "handletextpad": 0.5,
             "opacity": 0.8,
             "font_size_override": False,
-            "font_size": 10.0,
+            "font_size": 12.0,
         },
         "broken_y_axis": {"enabled": False, "gap": 0.1, "ranges": []},
         "stages": {"enabled": False, "overlay_alpha": 0.25, "steps": []},
@@ -243,7 +257,15 @@ def migrate_legacy_config(raw: Any) -> tuple[dict[str, Any], list[str]]:
     )
 
     legend = _legacy_section(raw, "legend", warnings)
-    for field in ("enabled", "loc", "ncols", "handlelength", "opacity"):
+    for field in (
+        "enabled",
+        "loc",
+        "ncols",
+        "handlelength",
+        "columnspacing",
+        "handletextpad",
+        "opacity",
+    ):
         if field in legend:
             config["legend"][field] = legend[field]
     bbox = legend.get("bbox_to_anchor")
@@ -561,12 +583,15 @@ def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
     for key in ("xscale", "yscale", "secondary_yscale"):
         if axes[key] not in {"linear", "log", "symlog", "logit"}:
             raise ConfigurationError(f"invalid {key}: {axes[key]}")
+    _validate_x_limits(axes)
     custom_ticks = axes.get("custom_x_ticks", [])
     labels = axes.get("custom_x_tick_labels", [])
     if not isinstance(custom_ticks, list) or not isinstance(labels, list):
         raise ConfigurationError("custom ticks and labels must be arrays")
     if labels and len(labels) != len(custom_ticks):
         raise ConfigurationError("custom tick labels must match custom tick positions")
+    _validate_y_tick_config(axes)
+    _validate_y_tick_config(axes, secondary=True)
     try:
         value_tick_interval = int(axes.get("x_value_tick_interval", 1))
     except (TypeError, ValueError) as error:
@@ -616,13 +641,26 @@ def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
     legend["ncols"] = ncols
     legend["enabled"] = bool(legend["enabled"])
     legend["bbox_enabled"] = bool(legend["bbox_enabled"])
-    for field in ("bbox_x", "bbox_y", "handlelength", "opacity"):
+    for field in (
+        "bbox_x",
+        "bbox_y",
+        "handlelength",
+        "columnspacing",
+        "handletextpad",
+        "opacity",
+    ):
         try:
             legend[field] = float(legend[field])
         except (TypeError, ValueError) as error:
             raise ConfigurationError(f"legend {field} must be a number") from error
+        if not math.isfinite(legend[field]):
+            raise ConfigurationError(f"legend {field} must be a finite number")
     if legend["handlelength"] < 0:
         raise ConfigurationError("legend handle length must be nonnegative")
+    if legend["columnspacing"] < 0:
+        raise ConfigurationError("legend column spacing must be nonnegative")
+    if legend["handletextpad"] < 0:
+        raise ConfigurationError("legend handle-to-label spacing must be nonnegative")
     if not 0 <= legend["opacity"] <= 1:
         raise ConfigurationError("legend opacity must be between 0 and 1")
     if not isinstance(config["layers"], list) or not config["layers"]:
@@ -725,6 +763,52 @@ def _validate_broken_y_axis(raw: Any, config: dict[str, Any]) -> dict[str, Any]:
     return {"enabled": enabled, "gap": gap, "ranges": normalized}
 
 
+def _validate_y_tick_config(axes: dict[str, Any], secondary: bool = False) -> None:
+    prefix = "secondary_" if secondary else ""
+    tick_key = "custom_secondary_y_ticks" if secondary else "custom_y_ticks"
+    label_key = (
+        "custom_secondary_y_tick_labels" if secondary else "custom_y_tick_labels"
+    )
+    range_keys = tuple(f"{prefix}y_tick_{field}" for field in ("min", "max", "step"))
+    name = "secondary Y" if secondary else "Y"
+    ticks = axes.get(tick_key, [])
+    labels = axes.get(label_key, [])
+    if not isinstance(ticks, list) or not isinstance(labels, list):
+        raise ConfigurationError(f"custom {name} ticks and labels must be arrays")
+    try:
+        ticks = [float(value) for value in ticks]
+    except (TypeError, ValueError) as error:
+        raise ConfigurationError(f"custom {name} ticks must be finite numbers") from error
+    if any(not math.isfinite(value) for value in ticks):
+        raise ConfigurationError(f"custom {name} ticks must be finite numbers")
+    if labels and len(labels) != len(ticks):
+        raise ConfigurationError(
+            f"custom {name} tick labels must match custom {name} tick positions"
+        )
+    axes[tick_key] = ticks
+    axes[label_key] = [str(value) for value in labels]
+    raw_range = [axes.get(field) for field in range_keys]
+    if not any(value is not None for value in raw_range):
+        for field in range_keys:
+            axes[field] = None
+        return
+    if any(value is None for value in raw_range):
+        raise ConfigurationError(f"{name} tick range requires minimum, maximum, and step")
+    try:
+        lower, upper, step = map(float, raw_range)
+    except (TypeError, ValueError) as error:
+        raise ConfigurationError(f"{name} tick range values must be finite numbers") from error
+    if not all(math.isfinite(value) for value in (lower, upper, step)):
+        raise ConfigurationError(f"{name} tick range values must be finite numbers")
+    if step <= 0:
+        raise ConfigurationError(f"{name} tick step must be greater than zero")
+    if lower > upper:
+        raise ConfigurationError(f"{name} tick minimum cannot be greater than its maximum")
+    if (upper - lower) / step > 10_000:
+        raise ConfigurationError(f"{name} tick range cannot produce more than 10,001 ticks")
+    axes[range_keys[0]], axes[range_keys[1]], axes[range_keys[2]] = lower, upper, step
+
+
 def _font_size(value: Any, field: str) -> float:
     try:
         result = float(value)
@@ -733,6 +817,36 @@ def _font_size(value: Any, field: str) -> float:
     if not 1 <= result <= 200:
         raise ConfigurationError(f"{field} must be between 1 and 200")
     return result
+
+
+def _validate_x_limits(axes: dict[str, Any]) -> None:
+    """Keep numeric bounds numeric while permitting ISO date/time or category values."""
+    for key in ("xmin", "xmax"):
+        value = axes.get(key)
+        if value is None or value == "":
+            axes[key] = None
+            continue
+        if isinstance(value, bool):
+            raise ConfigurationError(f"{key} must be a number, date/time, or X value")
+        if isinstance(value, (date, datetime)):
+            continue
+        if isinstance(value, (int, float)):
+            if not math.isfinite(float(value)):
+                raise ConfigurationError(f"{key} must be finite")
+            continue
+        if not isinstance(value, str):
+            raise ConfigurationError(f"{key} must be a number, date/time, or X value")
+        value = value.strip()
+        if not value or len(value) > 200:
+            raise ConfigurationError(f"{key} must be 1 to 200 characters")
+        try:
+            numeric = float(value)
+        except ValueError:
+            axes[key] = value
+        else:
+            if not math.isfinite(numeric):
+                raise ConfigurationError(f"{key} must be finite")
+            axes[key] = numeric
 
 
 def _validate_annotations(raw: Any, layers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -893,6 +1007,100 @@ def _groups(frame: pl.DataFrame) -> list[tuple[str | None, pl.DataFrame]]:
     return [(str(value), frame.filter(pl.col("_group") == value)) for value in values]
 
 
+def _layer_legend_proxy(layer: dict[str, Any], color: str, alpha: float) -> Any:
+    style = {**DEFAULT_STYLE, "color": color, **(layer.get("style") or {})}
+    plot_type = layer.get("plot_type", "line")
+    if plot_type in {"bar", "area", "histogram"}:
+        return Patch(
+            facecolor=style["color"],
+            edgecolor=style["color"],
+            alpha=alpha,
+        )
+    marker = style.get("marker")
+    if marker == "none":
+        marker = None
+    if plot_type == "scatter" and marker is None:
+        marker = "o"
+    return Line2D(
+        [],
+        [],
+        color=style["color"],
+        alpha=alpha,
+        linewidth=float(style.get("linewidth", 1.5)),
+        linestyle="none" if plot_type == "scatter" else style.get("linestyle", "-"),
+        marker=marker,
+        markersize=float(style.get("markersize", 4)),
+    )
+
+
+def _annotation_legend_proxy(item: dict[str, Any], alpha: float) -> Any:
+    color = item.get("text_color", item.get("color", "#666666"))
+    kind = item.get("kind", "text")
+    if kind in {"vspan", "hspan"}:
+        return Patch(facecolor=color, edgecolor=color, alpha=alpha)
+    return Line2D(
+        [],
+        [],
+        color=color,
+        alpha=alpha,
+        linewidth=float(item.get("linewidth", 1.0)),
+        linestyle="none" if kind == "text" else item.get("linestyle", "--"),
+        marker="o" if kind == "text" else None,
+        markersize=4,
+    )
+
+
+def _stage_legend_entries(
+    config: dict[str, Any],
+    engine: QueryEngine,
+    layer_frames: dict[str, pl.DataFrame],
+    shared_x_values: list[Any] | None,
+) -> tuple[list[Any], list[str], list[bool]]:
+    handles: list[Any] = []
+    labels: list[str] = []
+    visibility: list[bool] = []
+    selections = config.get("_stage_legend_elements", {})
+    overlay_alpha = float(config["stages"].get("overlay_alpha", 0.25))
+    for index, raw_layer in enumerate(config.get("_stage_legend_layers", [])):
+        if raw_layer.get("plot_type", "line") in {"box", "violin", "hexbin"}:
+            continue
+        group_names: list[str | None] = [None]
+        if raw_layer.get("group_column"):
+            frame = layer_frames.get(str(raw_layer.get("id")))
+            if frame is None:
+                query_layer = raw_layer
+                if shared_x_values is not None:
+                    query_layer = {
+                        **raw_layer,
+                        "fixed_x_values": shared_x_values,
+                        "result_limit": None,
+                        "sort": "none",
+                    }
+                frame, _, _ = engine.execute(query_layer)
+            group_names = [group for group, _ in _groups(frame)]
+        selection = selections.get(f"layer:{raw_layer['id']}")
+        visible = selection is not None
+        style = raw_layer.get("style") or {}
+        alpha = float(style.get("alpha", 1.0))
+        if visible and selection.get("overlay", False):
+            alpha *= overlay_alpha
+        if not visible:
+            alpha = 0.0
+        color = str(style.get("color", STD_COLORS[index % len(STD_COLORS)]))
+        for group in group_names:
+            label = raw_layer["label"] if group is None else f"{raw_layer['label']}: {group}"
+            handles.append(_layer_legend_proxy(raw_layer, color, alpha))
+            labels.append(label)
+            visibility.append(visible)
+    for annotation in config.get("_stage_legend_annotations", []):
+        visible = f"annotation:{annotation['id']}" in selections
+        alpha = float(annotation.get("alpha", 0.6)) if visible else 0.0
+        handles.append(_annotation_legend_proxy(annotation, alpha))
+        labels.append(str(annotation["legend_label"]))
+        visibility.append(visible)
+    return handles, labels, visibility
+
+
 def build_figure(config: dict[str, Any], engine: QueryEngine, registry: Registry):
     figure = config["figure"]
     global_font_size = float(figure["font_size"])
@@ -924,7 +1132,14 @@ def build_figure(config: dict[str, Any], engine: QueryEngine, registry: Registry
     else:
         fig, primary = plt.subplots(figsize=(float(figure["width"]), float(figure["height"])))
         primary_axes = [primary]
-    secondary = None
+    secondary = (
+        primary.twinx()
+        if any(
+            layer.get("secondary_y", False)
+            for layer in config.get("_stage_legend_layers", [])
+        )
+        else None
+    )
     state: dict[str, Any] = {}
     cache_states: list[dict[str, str]] = []
     layer_frames: dict[str, pl.DataFrame] = {}
@@ -1084,12 +1299,12 @@ def build_figure(config: dict[str, Any], engine: QueryEngine, registry: Registry
         secondary.set_ylabel(
             str(axes["secondary_ylabel"]).replace("\\n", "\n"), fontsize=label_font_size
         )
-    if axes["xmin"] is None and axes["xmax"] is None:
-        if shared_x_values is not None:
-            primary.set_xlim(-0.5, len(shared_x_values) - 0.5)
-        else:
-            _automatic_x_limits(primary, x_values, time_bins)
-    _limits(primary, axes["xmin"], axes["xmax"], "x")
+    if shared_x_values is not None:
+        primary.set_xlim(-0.5, len(shared_x_values) - 0.5)
+    elif axes["xmin"] is None and axes["xmax"] is None:
+        _automatic_x_limits(primary, x_values, time_bins)
+    xmin = _x_limit_value(axes["xmin"], x_values, shared_x_values)
+    xmax = _x_limit_value(axes["xmax"], x_values, shared_x_values)
     if broken_y["enabled"]:
         for axis, value_range in zip(primary_axes, reversed(broken_y["ranges"]), strict=True):
             axis.set_ylim(value_range["min"], value_range["max"])
@@ -1112,11 +1327,18 @@ def build_figure(config: dict[str, Any], engine: QueryEngine, registry: Registry
         )
     else:
         _ticks(primary, axes, time_axis_x, x_values)
+    # set_xticks may expand Matplotlib's view interval. Explicit bounds are the
+    # final authority and therefore must be applied after all X tick locators.
+    _limits(primary, xmin, xmax, "x")
     if axes["y_engineering"]:
         for axis in primary_axes:
             axis.yaxis.set_major_formatter(mticker.EngFormatter(sep=""))
+    for axis in primary_axes:
+        _y_ticks(axis, axes)
     if secondary is not None and axes["secondary_y_engineering"]:
         secondary.yaxis.set_major_formatter(mticker.EngFormatter(sep=""))
+    if secondary is not None:
+        _y_ticks(secondary, axes, secondary=True)
     for axis in primary_axes:
         axis.tick_params(axis="both", which="both", labelsize=tick_font_size)
     if secondary is not None:
@@ -1153,18 +1375,26 @@ def build_figure(config: dict[str, Any], engine: QueryEngine, registry: Registry
     if broken_y["enabled"]:
         _broken_axis_marks(primary_axes)
     if config["legend"]["enabled"]:
-        handles, labels = [], []
-        for axis in (primary, secondary):
-            if axis is not None:
-                current_handles, current_labels = axis.get_legend_handles_labels()
-                handles.extend(current_handles)
-                labels.extend(current_labels)
+        legend_visibility: list[bool] | None = None
+        if "_stage_legend_layers" in config:
+            handles, labels, legend_visibility = _stage_legend_entries(
+                config, engine, layer_frames, shared_x_values
+            )
+        else:
+            handles, labels = [], []
+            for axis in (primary, secondary):
+                if axis is not None:
+                    current_handles, current_labels = axis.get_legend_handles_labels()
+                    handles.extend(current_handles)
+                    labels.extend(current_labels)
         if handles:
             legend_options = {
                 "loc": config["legend"]["loc"],
                 "ncols": int(config["legend"]["ncols"]),
                 "fontsize": legend_font_size,
                 "handlelength": float(config["legend"]["handlelength"]),
+                "columnspacing": float(config["legend"]["columnspacing"]),
+                "handletextpad": float(config["legend"]["handletextpad"]),
                 "framealpha": float(config["legend"]["opacity"]),
             }
             if config["legend"]["bbox_enabled"]:
@@ -1172,8 +1402,15 @@ def build_figure(config: dict[str, Any], engine: QueryEngine, registry: Registry
                     float(config["legend"]["bbox_x"]),
                     float(config["legend"]["bbox_y"]),
                 )
-            legend_axis = primary_axes[0] if broken_y["enabled"] else primary
-            legend_axis.legend(handles, labels, **legend_options)
+            if legend_visibility is not None:
+                created_legend = fig.legend(handles, labels, **legend_options)
+                for text, visible in zip(
+                    created_legend.get_texts(), legend_visibility, strict=True
+                ):
+                    text.set_alpha(1.0 if visible else 0.0)
+            else:
+                legend_axis = primary_axes[0] if broken_y["enabled"] else primary
+                created_legend = legend_axis.legend(handles, labels, **legend_options)
     if figure["font_family"] == "monospace":
         for text in fig.findobj(match=plt.Text):
             text.set_fontfamily("monospace")
@@ -1214,10 +1451,62 @@ def _broken_axis_marks(axes: list[Any]) -> None:
 
 
 def _limits(ax, lower: Any, upper: Any, axis: str) -> None:
-    if (lower is None) != (upper is None):
-        raise ConfigurationError(f"both {axis} limits must be supplied")
-    if lower is not None:
-        getattr(ax, f"set_{axis}lim")(lower, upper)
+    if lower is None and upper is None:
+        return
+    current_lower, current_upper = getattr(ax, f"get_{axis}lim")()
+    getattr(ax, f"set_{axis}lim")(
+        current_lower if lower is None else lower,
+        current_upper if upper is None else upper,
+    )
+
+
+def _x_limit_value(
+    value: Any,
+    x_values: list[Any],
+    shared_x_values: list[Any] | None = None,
+) -> Any:
+    """Resolve a configured X bound into the coordinate system used by the plot."""
+    if value is None or isinstance(value, (date, datetime)):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not math.isfinite(float(value)):
+            raise ConfigurationError("X limit must be finite")
+        return float(value)
+    domain = shared_x_values if shared_x_values is not None else x_values
+    sample = next((item for item in domain if item is not None), None)
+    if shared_x_values is not None:
+        text = str(value)
+        for position, item in enumerate(shared_x_values):
+            if item == value or str(item) == text:
+                return float(position)
+        raise ConfigurationError(f"X limit {value!r} is not in the fixed X-value domain")
+    if isinstance(sample, datetime):
+        if not isinstance(value, str):
+            raise ConfigurationError("date/time X limits must use an ISO date or timestamp")
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ConfigurationError(f"invalid date/time X limit: {value!r}") from error
+    if isinstance(sample, date):
+        if not isinstance(value, str):
+            raise ConfigurationError("date X limits must use an ISO date")
+        try:
+            return date.fromisoformat(value)
+        except ValueError as error:
+            raise ConfigurationError(f"invalid date X limit: {value!r}") from error
+    if isinstance(sample, str):
+        text = str(value)
+        values = list(dict.fromkeys(str(item) for item in domain if item is not None))
+        if text not in values:
+            raise ConfigurationError(f"X limit {value!r} is not present in the X values")
+        return float(values.index(text))
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigurationError(f"X limit must be numeric: {value!r}") from error
+    if not math.isfinite(result):
+        raise ConfigurationError("X limit must be finite")
+    return result
 
 
 def _automatic_x_limits(ax, values: list[Any], time_bins: list[str]) -> None:
@@ -1315,6 +1604,27 @@ def _ticks(
         horizontalalignment=axes["x_tick_horizontal_alignment"],
         verticalalignment=axes["x_tick_vertical_alignment"],
     )
+
+
+def _y_ticks(ax, axes: dict[str, Any], secondary: bool = False) -> None:
+    prefix = "secondary_" if secondary else ""
+    tick_key = "custom_secondary_y_ticks" if secondary else "custom_y_ticks"
+    label_key = (
+        "custom_secondary_y_tick_labels" if secondary else "custom_y_tick_labels"
+    )
+    ticks = axes.get(tick_key, [])
+    labels = axes.get(label_key, [])
+    if not ticks and axes.get(f"{prefix}y_tick_min") is not None:
+        lower = float(axes[f"{prefix}y_tick_min"])
+        upper = float(axes[f"{prefix}y_tick_max"])
+        step = float(axes[f"{prefix}y_tick_step"])
+        count = int((upper - lower) / step + 1e-12) + 1
+        ticks = [lower + index * step for index in range(count)]
+    if not ticks:
+        return
+    ax.yaxis.set_major_locator(mticker.FixedLocator(ticks))
+    if labels:
+        ax.yaxis.set_major_formatter(mticker.FixedFormatter(labels))
 
 
 def _resolve_annotation(
@@ -1634,18 +1944,50 @@ def _stage_configs(config: dict[str, Any]) -> list[tuple[str, str | None, dict[s
         ),
         None,
     )
+    staged_element_ids = {
+        element["id"]
+        for step in stages["steps"]
+        for element in step["elements"]
+    }
     for index, step in enumerate(stages["steps"]):
         selected = {item["id"]: item for item in step["elements"]}
         stage = deepcopy(config)
         stage["stages"]["enabled"] = False
-        stage["layers"] = []
+        stage["_stage_legend_layers"] = []
+        legend_color_index = 0
         for layer in config["layers"]:
+            if not layer.get("enabled", True):
+                continue
+            default_color = STD_COLORS[legend_color_index % len(STD_COLORS)]
+            legend_color_index += 1
+            if f"layer:{layer['id']}" not in staged_element_ids:
+                continue
+            legend_layer = deepcopy(layer)
+            legend_layer.setdefault("style", {})
+            legend_layer["style"].setdefault("color", default_color)
+            stage["_stage_legend_layers"].append(legend_layer)
+        stage["_stage_legend_annotations"] = [
+            deepcopy(annotation)
+            for annotation in config["annotations"]
+            if annotation.get("enabled", True) and annotation.get("show_in_legend", False)
+            and f"annotation:{annotation['id']}" in staged_element_ids
+        ]
+        stage["_stage_legend_elements"] = deepcopy(selected)
+        if stage["legend"]["loc"] == "best":
+            stage["legend"]["loc"] = "upper right"
+        stage["layers"] = []
+        stage_color_index = 0
+        for layer in config["layers"]:
+            default_color = STD_COLORS[stage_color_index % len(STD_COLORS)]
+            if layer.get("enabled", True):
+                stage_color_index += 1
             selection = selected.get(f"layer:{layer['id']}")
             if selection is None:
                 continue
             current = deepcopy(layer)
+            current.setdefault("style", {})
+            current["style"].setdefault("color", default_color)
             if selection["overlay"]:
-                current.setdefault("style", {})
                 current["style"]["alpha"] = (
                     float(current["style"].get("alpha", 1.0)) * overlay_alpha
                 )

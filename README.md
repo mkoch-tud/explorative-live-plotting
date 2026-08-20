@@ -171,10 +171,60 @@ built-in aggregation functions and their options:
 | `n_unique` | Number of unique Y values in each group | `{}` |
 | `quantile` | Quantile of Y | `{"quantile":0.95}`; must be from 0 to 1 and defaults to `0.5` |
 
-Filters run before aggregation. The exception is the denominator of
-`relative_count`, which intentionally counts all input rows in the same bin
-before the layer filters are applied. Plugin aggregations receive the entire
-aggregation-options object.
+Filters run before aggregation. The root filter list can use AND or OR, and
+**+ nested group** adds a parenthesized group with its own AND/OR choice. Groups
+can be nested repeatedly. For example, this selects packets in a time range
+whose TTL is high or whose TCP-options field is non-null:
+
+```json
+{
+  "filter_logic": "and",
+  "filters": [
+    {
+      "column": "timestamp",
+      "operator": "between",
+      "value": "2026-04-01T00:05:00+00:00",
+      "value2": "2026-04-01T00:10:00+00:00"
+    },
+    {
+      "type": "group",
+      "logic": "or",
+      "filters": [
+        {"column": "ttl", "operator": "gt", "value": 200},
+        {"column": "tcp_options", "operator": "is_not_null"}
+      ]
+    }
+  ]
+}
+```
+
+`between` includes both endpoints. Its `value` is the minimum and `value2` is
+the maximum; JSON configurations may equivalently use `min` and `max`. For a
+single time bound, use **minimum / at or after (>=)** (`ge`) or
+**maximum / at or before (<=)** (`le`). Date and datetime text is interpreted
+as ISO 8601, such as `2026-04-01`, `2026-04-01T05:30:00`, or
+`2026-04-01T05:30:00+00:00`.
+
+Every condition has a **Query 5 values** button. It returns the column minimum,
+maximum, and three ordered distribution values in between, then exposes those
+values as input suggestions. Numeric and temporal columns use one lazy
+projection with aggregate quantiles, so only one small result row is collected;
+other data types use ordered distinct values but still return at most five
+values to the browser. This helper queries the source column independently of
+the layer's filters and input-row limit.
+
+For `equals` on a Date or Datetime column, open **Choose an existing time
+value** to browse the column's actual distinct timestamps. The list is sorted
+and scrollable. It requests 250 values at a time and automatically fetches the
+next page near the bottom, so every distinct value remains available without
+one unbounded JSON response. Selecting an entry copies its exact ISO value into
+the equality filter. Like **Query 5 values**, this picker reads the source
+column before layer filters or the input-row limit.
+
+The exception to normal filter order is the denominator of `relative_count`,
+which intentionally counts all input rows in the same bin before the layer
+filters are applied. Plugin aggregations receive the entire aggregation-options
+object.
 
 ### Built-in plot options JSON
 
@@ -195,14 +245,35 @@ Unlisted keys are ignored by built-in renderers. Plugin plot types receive the
 entire plot-options object through `context.layer["options"]`.
 
 Axis controls include labels, limits, linear/log/symlog/logit scales, grids,
-custom x ticks and labels, major/minor ticks, rotation, alignment, and a
+custom X/Y ticks and labels, major/minor ticks, rotation, alignment, and a
 plot-wide default or monospace font. Independent engineering-notation toggles
 are available for X, Y, and secondary Y. Custom X tick labels take precedence
 over automatic date or engineering formatting. A global font size applies by
-default; checkboxes enable separate axis-label, legend, and tick sizes.
+default; new plots start at 5.6 × 2.8 inches with a 12-point global font.
+Checkboxes enable separate axis-label, legend, and tick sizes.
 Engineering labels use compact notation without whitespace, such as `1k` or
 `2.5M`. X, Y, and secondary-Y grids are always drawn behind plot layers. The
 shared **Grid opacity** setting ranges from 0 (invisible) to 1 (fully opaque).
+**X min** and **X max** are true Matplotlib-style `xlim` bounds: either side may
+be supplied independently, and explicit limits are reapplied after tick
+placement so custom ticks cannot enlarge the visible range. Numeric axes accept
+numbers, categorical axes accept actual X values, and date/time axes accept ISO
+values such as `2026-04-01T00:05:00+00:00`.
+
+Primary Y ticks can be configured in two ways. **Custom Y ticks** accepts exact
+comma-separated positions, with optional matching labels. Alternatively, set
+all three **Tick range minimum**, **Tick range maximum**, and **Tick step**
+fields to generate evenly spaced tick positions. Custom positions take
+precedence when both forms are present. Tick settings do not change the visible
+axis extent; use the separate Y min/max controls for that. On a broken Y axis,
+the same locator is applied to every panel and only ticks inside each panel's
+visible range are drawn.
+
+The secondary Y axis has its own scale selector, limits, custom ticks and
+labels, and min/max/step tick range. These settings apply only to layers with
+**Secondary y** enabled. For example, select `log` under **Secondary Y scale**
+and use custom ticks `1, 10, 100, 1000` without changing the primary Y scale or
+ticks. Secondary-axis settings are also preserved in exported standalone code.
 
 Enable **Use actual X-column values as tick labels** for categorical plots to
 show values such as `DEU`, `NLD`, and `USA` instead of numeric category
@@ -224,7 +295,11 @@ violin layers.
 
 The legend can be toggled independently and configured with an anchor location,
 optional `bbox_to_anchor` X/Y coordinates, handle length, column count, and
-frame opacity.
+frame opacity. **Spacing between columns** maps to Matplotlib's `columnspacing`,
+while **Spacing between handle and label** maps to `handletextpad`; both are
+measured in units of the legend font size and update live without recalculating
+layer data. New plots default to `upper left`, handle length `1.5`, column
+spacing `0.8`, handle-to-label spacing `0.5`, and bbox X `0.115`.
 
 The configuration panel starts wider than before and can be resized by dragging
 the divider between the controls and preview. Its width is remembered locally;
@@ -312,6 +387,16 @@ overlay-opacity control sets how strongly selected overlay layers are faded.
 Stages can also be added and composed manually. When a fixed-X anchor is not
 visible in a stage, it is still evaluated in the background so that follower
 layers retain the same shared X domain.
+
+The legend reserves the union of all entries used by the stage sequence from
+the first stage onward. Future handles and labels are transparent placeholders
+and uncover in place with their layer or annotation, keeping the legend box at
+the same size and position throughout. Staged legends are anchored to the
+figure canvas so axis-layout changes cannot move them. For split/grouped layers,
+the grouped query may be evaluated early to discover the final legend labels.
+Because Matplotlib's `best` location can move as plot data appears, staged plots
+pin a `best` legend to `upper right`; select another explicit anchor location
+when a different fixed position is preferred.
 
 Stage preview, save, and download operations create filenames such as
 `plot-01-Stage-1.png`. The JSON configuration is written once. Standalone code

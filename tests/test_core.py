@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 
@@ -101,6 +101,27 @@ def test_legacy_annotations_are_mapped_to_current_coordinates() -> None:
 
 def test_current_config_migration_is_a_noop_copy() -> None:
     current = default_config()
+    assert current["figure"] == {
+        "width": 5.6,
+        "height": 2.8,
+        "dpi": 150,
+        "font_family": "default",
+        "font_size": 12.0,
+    }
+    assert current["legend"] == {
+        "enabled": True,
+        "loc": "upper left",
+        "ncols": 1,
+        "bbox_enabled": False,
+        "bbox_x": 0.115,
+        "bbox_y": 1.0,
+        "handlelength": 1.5,
+        "columnspacing": 0.8,
+        "handletextpad": 0.5,
+        "opacity": 0.8,
+        "font_size_override": False,
+        "font_size": 12.0,
+    }
     migrated, warnings = migrate_legacy_config(current)
     assert migrated == current
     assert migrated is not current
@@ -379,6 +400,25 @@ def test_generic_mixed_plot(tmp_path: Path) -> None:
     assert engineering_figure.axes[1].yaxis.get_major_formatter().format_eng(1000) == "1k"
     assert engineering_figure.axes[0].get_xlim() == (1.0, 3.0)
 
+    limited_config = default_config()
+    limited_config["axes"].update(
+        xmin=1.5,
+        xmax=2.5,
+        custom_x_ticks=[1, 2, 3],
+        custom_x_tick_labels=["one", "two", "three"],
+    )
+    limited_config["layers"] = [config["layers"][0]]
+    limited_config = validate_config(limited_config, registry)
+    limited_figure, _ = build_figure(limited_config, engine, registry)
+    assert limited_figure.axes[0].get_xlim() == (1.5, 2.5)
+
+    one_sided_config = default_config()
+    one_sided_config["axes"]["xmin"] = 1.5
+    one_sided_config["layers"] = [config["layers"][0]]
+    one_sided_config = validate_config(one_sided_config, registry)
+    one_sided_figure, _ = build_figure(one_sided_config, engine, registry)
+    assert one_sided_figure.axes[0].get_xlim()[0] == 1.5
+
 
 def test_fixed_shared_x_values_filter_and_align_ranked_layers(tmp_path: Path) -> None:
     data = tmp_path / "ranked.parquet"
@@ -431,6 +471,11 @@ def test_fixed_shared_x_values_filter_and_align_ranked_layers(tmp_path: Path) ->
     assert [patch.get_x() + patch.get_width() / 2 for patch in axis.patches] == [0, 1]
     assert [patch.get_height() for patch in axis.patches] == [5, 4]
     assert [item["rows"] for item in states] == [2, 2]
+
+    config["axes"].update(xmin="DEU", xmax="NLD")
+    config = validate_config(config, registry)
+    category_limited_figure, _ = build_figure(config, engine, registry)
+    assert category_limited_figure.axes[0].get_xlim() == (0.0, 1.0)
 
     config["stages"] = {
         "enabled": True,
@@ -822,6 +867,8 @@ def test_path_autocomplete_and_system_stats(tmp_path: Path, monkeypatch) -> None
     assert 'id="grid-opacity"' in page
     assert 'id="config-panel"' in page
     assert 'id="panel-resizer"' in page
+    assert 'id="legend-columnspacing"' in page
+    assert 'id="legend-handletextpad"' in page
 
 
 def test_time_bins_absolute_and_relative_counts(tmp_path: Path) -> None:
@@ -909,7 +956,11 @@ def test_time_bins_absolute_and_relative_counts(tmp_path: Path) -> None:
     assert lower < mdates.date2num(datetime(2026, 4, 1, tzinfo=timezone.utc)) < upper
 
     custom_date_config = default_config()
-    custom_date_config["axes"]["x_datetime_format"] = "%b %d, %Y %H:%M"
+    custom_date_config["axes"].update(
+        x_datetime_format="%b %d, %Y %H:%M",
+        xmin="2026-04-01T00:00:15+00:00",
+        xmax="2026-04-01T00:01:15+00:00",
+    )
     custom_date_config["layers"] = [
         {**base, "id": "dated", "aggregation": "count"}
     ]
@@ -927,6 +978,10 @@ def test_time_bins_absolute_and_relative_counts(tmp_path: Path) -> None:
     custom_date_figure, _ = build_figure(custom_date_config, engine, registry)
     date_formatter = custom_date_figure.axes[0].xaxis.get_major_formatter()
     assert isinstance(date_formatter, mdates.DateFormatter)
+    assert custom_date_figure.axes[0].get_xlim() == (
+        mdates.date2num(datetime(2026, 4, 1, 0, 0, 15, tzinfo=timezone.utc)),
+        mdates.date2num(datetime(2026, 4, 1, 0, 1, 15, tzinfo=timezone.utc)),
+    )
     assert date_formatter(
         mdates.date2num(datetime(2026, 4, 1, tzinfo=timezone.utc))
     ) == "Apr 01, 2026 00:00"
@@ -952,16 +1007,221 @@ def test_time_bins_absolute_and_relative_counts(tmp_path: Path) -> None:
     assert "mdates.ConciseDateFormatter" in script
     assert "'%b %d, %Y'" in script
     assert "_automatic_x_limits" in script
+    assert "xmin = _x_limit_value" in script
+    assert script.index("_ticks(primary, axes") < script.index(
+        "_limits(primary, xmin, xmax, 'x')"
+    )
     assert "mticker.EngFormatter(sep='')" in script
     assert "plot_axis.set_axisbelow(True)" in script
     assert 'STD_COLORS = ["#375E97", "#FB6542", "#c1195c", "#37975e"]' in script
 
 
+def test_nested_time_filters_and_column_excerpt(tmp_path: Path) -> None:
+    data = tmp_path / "timestamps.parquet"
+    start = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    timestamps = [start + timedelta(minutes=index) for index in range(9)]
+    pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "scan_date": [f"2026-04-{index:02d}" for index in range(1, 10)],
+            "ttl": [100, 250, 100, 100, 250, 100, 100, 100, 250],
+            "tcp_options": [None, None, "mss", None, None, None, "sack", None, None],
+        }
+    ).write_parquet(data)
+    catalog = DataCatalog()
+    catalog.add(SourceSpec("packets", str(data)))
+    registry = builtins()
+    engine = QueryEngine(catalog, registry, QueryCache(tmp_path / "cache"))
+    nested_filters = [
+        {
+            "column": "timestamp",
+            "operator": "between",
+            "value": timestamps[1].isoformat(),
+            "value2": timestamps[7].isoformat(),
+        },
+        {
+            "type": "group",
+            "logic": "or",
+            "filters": [
+                {"column": "ttl", "operator": "gt", "value": 200},
+                {
+                    "type": "group",
+                    "logic": "and",
+                    "filters": [
+                        {"column": "tcp_options", "operator": "is_not_null"},
+                        {"column": "ttl", "operator": "lt", "value": 200},
+                    ],
+                },
+            ],
+        },
+    ]
+    raw_layer = {
+        "id": "nested",
+        "source": "packets",
+        "plot_type": "line",
+        "x_column": "timestamp",
+        "y_column": "ttl",
+        "aggregation": "none",
+        "filter_logic": "and",
+        "filters": nested_filters,
+        "sort": "x_ascending",
+    }
+    frame, validated, _ = engine.execute(raw_layer)
+    assert frame.get_column("_x").to_list() == [
+        timestamps[1],
+        timestamps[2],
+        timestamps[4],
+        timestamps[6],
+    ]
+    assert validated["filters"] == nested_filters
+
+    alias_layer = {
+        **raw_layer,
+        "id": "range-aliases",
+        "filters": [
+            {
+                "column": "timestamp",
+                "operator": "between",
+                "min": timestamps[2].isoformat(),
+                "max": timestamps[4].isoformat(),
+            }
+        ],
+    }
+    alias_frame, _, _ = engine.execute(alias_layer)
+    assert alias_frame.get_column("_x").to_list() == timestamps[2:5]
+
+    excerpt = catalog.column_excerpt("packets", "timestamp", intermediate=3)
+    assert excerpt == {
+        "source": "packets",
+        "column": "timestamp",
+        "dtype": "Datetime(time_unit='us', time_zone='UTC')",
+        "values": [timestamps[index].isoformat() for index in (0, 2, 4, 6, 8)],
+    }
+    scan_dates = catalog.column_excerpt("packets", "scan_date", intermediate=3)
+    assert scan_dates["values"] == [
+        "2026-04-01",
+        "2026-04-03",
+        "2026-04-05",
+        "2026-04-07",
+        "2026-04-09",
+    ]
+    first_page = catalog.column_values("packets", "timestamp", offset=0, limit=4)
+    second_page = catalog.column_values("packets", "timestamp", offset=4, limit=4)
+    last_page = catalog.column_values("packets", "timestamp", offset=8, limit=4)
+    assert first_page["values"] == [value.isoformat() for value in timestamps[:4]]
+    assert first_page["next_offset"] == 4 and first_page["has_more"] is True
+    assert second_page["values"] == [value.isoformat() for value in timestamps[4:8]]
+    assert second_page["next_offset"] == 8 and second_page["has_more"] is True
+    assert last_page["values"] == [timestamps[8].isoformat()]
+    assert last_page["next_offset"] is None and last_page["has_more"] is False
+    state = ApplicationState(catalog, registry, QueryCache(tmp_path / "api-cache"), tmp_path)
+    response = create_app(state).test_client().get(
+        "/api/sources/packets/column-excerpt",
+        query_string={"column": "scan_date", "intermediate": 3},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["values"] == scan_dates["values"]
+    response = create_app(state).test_client().get(
+        "/api/sources/packets/column-values",
+        query_string={"column": "timestamp", "offset": 4, "limit": 4},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["values"] == second_page["values"]
+
+    config = default_config()
+    config["sources"] = catalog.specs()
+    config["layers"] = [raw_layer]
+    script = generate_script(config, catalog, registry)
+    compile(script, "nested-filters.py", "exec")
+    assert ".is_between(" in script
+    assert "pl.any_horizontal" in script
+    assert script.count("pl.all_horizontal") >= 2
+    assert "def _y_ticks" in script
+    browser_script = (
+        Path(__file__).parents[1] / "src/explorative_live_plotting/static/app.js"
+    ).read_text()
+    assert "+ nested group" in browser_script
+    assert "column-excerpt" in browser_script
+    assert "column-values" in browser_script
+    assert "Choose an existing time value" in browser_script
+
+    custom_tick_config = default_config()
+    custom_tick_config["sources"] = catalog.specs()
+    custom_tick_config["layers"] = [raw_layer]
+    custom_tick_config["axes"].update(
+        {
+            "custom_y_ticks": [0, 100, 250],
+            "custom_y_tick_labels": ["none", "normal", "high"],
+        }
+    )
+    custom_tick_config = validate_config(custom_tick_config, registry)
+    custom_tick_figure, _ = build_figure(custom_tick_config, engine, registry)
+    assert custom_tick_figure.axes[0].get_yticks().tolist() == [0, 100, 250]
+    assert [label.get_text() for label in custom_tick_figure.axes[0].get_yticklabels()] == [
+        "none",
+        "normal",
+        "high",
+    ]
+    custom_tick_script = generate_script(custom_tick_config, catalog, registry)
+    compile(custom_tick_script, "custom-y-ticks.py", "exec")
+    assert "'custom_y_ticks': [0.0, 100.0, 250.0]" in custom_tick_script
+    assert "_y_ticks(plot_axis, axes)" in custom_tick_script
+
+    range_tick_config = default_config()
+    range_tick_config["layers"] = [raw_layer]
+    range_tick_config["axes"].update(
+        {"y_tick_min": 0, "y_tick_max": 300, "y_tick_step": 100}
+    )
+    range_tick_config = validate_config(range_tick_config, registry)
+    range_tick_figure, _ = build_figure(range_tick_config, engine, registry)
+    assert range_tick_figure.axes[0].get_yticks().tolist() == [0, 100, 200, 300]
+
+    secondary_tick_config = default_config()
+    secondary_tick_config["sources"] = catalog.specs()
+    secondary_tick_config["layers"] = [{**raw_layer, "secondary_y": True}]
+    secondary_tick_config["axes"].update(
+        {
+            "secondary_yscale": "log",
+            "secondary_ymin": 10,
+            "secondary_ymax": 1000,
+            "custom_secondary_y_ticks": [10, 100, 1000],
+            "custom_secondary_y_tick_labels": ["ten", "hundred", "thousand"],
+        }
+    )
+    secondary_tick_config = validate_config(secondary_tick_config, registry)
+    secondary_tick_figure, _ = build_figure(secondary_tick_config, engine, registry)
+    secondary_axis = secondary_tick_figure.axes[1]
+    assert secondary_axis.get_yscale() == "log"
+    assert secondary_axis.get_ylim() == (10, 1000)
+    assert secondary_axis.get_yticks().tolist() == [10, 100, 1000]
+    assert [label.get_text() for label in secondary_axis.get_yticklabels()] == [
+        "ten",
+        "hundred",
+        "thousand",
+    ]
+    secondary_tick_script = generate_script(secondary_tick_config, catalog, registry)
+    compile(secondary_tick_script, "secondary-y-ticks.py", "exec")
+    assert "secondary.set_yscale(axes['secondary_yscale'])" in secondary_tick_script
+    assert "_y_ticks(secondary, axes, secondary=True)" in secondary_tick_script
+
+    page = (
+        Path(__file__).parents[1]
+        / "src/explorative_live_plotting/templates/index.html"
+    ).read_text()
+    assert 'id="secondary-yscale"' in page
+    assert 'id="secondary-yticks"' in page
+
+
 def test_fonts_structured_annotations_and_stages(tmp_path: Path) -> None:
     data = tmp_path / "data.parquet"
-    pl.DataFrame({"x": [1, 2, 3], "first": [1, 2, 3], "second": [3, 2, 1]}).write_parquet(
-        data
-    )
+    pl.DataFrame(
+        {
+            "x": [1, 2, 3],
+            "first": [1, 2, 3],
+            "second": [3, 2, 1],
+            "group": ["A", "B", "A"],
+        }
+    ).write_parquet(data)
     catalog = DataCatalog()
     catalog.add(SourceSpec("sample", str(data)))
     registry = builtins()
@@ -985,6 +1245,8 @@ def test_fonts_structured_annotations_and_stages(tmp_path: Path) -> None:
         bbox_x=0.25,
         bbox_y=0.75,
         handlelength=4,
+        columnspacing=1.25,
+        handletextpad=0.35,
         opacity=0.4,
     )
     config["layers"] = [
@@ -1005,7 +1267,9 @@ def test_fonts_structured_annotations_and_stages(tmp_path: Path) -> None:
             "plot_type": "line",
             "x_column": "x",
             "y_column": "second",
+            "group_column": "group",
             "aggregation": "sum",
+            "secondary_y": True,
         },
     ]
     config["annotations"] = [
@@ -1013,6 +1277,8 @@ def test_fonts_structured_annotations_and_stages(tmp_path: Path) -> None:
             "id": "note",
             "kind": "text",
             "text": "Look here",
+            "show_in_legend": True,
+            "legend_label": "Note",
             "x": 2,
             "y": 2,
             "fontsize": 17,
@@ -1026,6 +1292,8 @@ def test_fonts_structured_annotations_and_stages(tmp_path: Path) -> None:
     assert legend.get_texts()[0].get_fontsize() == 12
     assert legend._ncols == 2
     assert legend.handlelength == 4
+    assert legend.columnspacing == 1.25
+    assert legend.handletextpad == 0.35
     assert legend.get_frame().get_alpha() == 0.4
     assert legend.get_bbox_to_anchor()._bbox.bounds == (0.25, 0.75, 0.0, 0.0)
     annotation_text = next(
@@ -1036,6 +1304,8 @@ def test_fonts_structured_annotations_and_stages(tmp_path: Path) -> None:
     compile(script, "annotation-plot.py", "exec")
     assert "_foreground_text(plot_axis" in script
     assert "clip_on=False, zorder=1000" in script
+    assert "columnspacing=1.25" in script
+    assert "handletextpad=0.35" in script
 
     config["stages"]["enabled"] = True
     config = validate_config(config, registry)
@@ -1043,6 +1313,31 @@ def test_fonts_structured_annotations_and_stages(tmp_path: Path) -> None:
     views = _stage_configs(config)
     assert len(views) == 3
     assert views[1][2]["layers"][0]["style"]["alpha"] == 0.2
+    best_location_views = _stage_configs(
+        {**config, "legend": {**config["legend"], "loc": "best"}}
+    )
+    assert all(view[2]["legend"]["loc"] == "upper right" for view in best_location_views)
+    stage_legends = []
+    legend_bounds = []
+    for _, _, stage_config in views:
+        stage_figure, _ = build_figure(stage_config, engine, registry)
+        stage_figure.canvas.draw()
+        assert len(stage_figure.axes) == 2
+        stage_legend = stage_figure.legends[0]
+        stage_legends.append(stage_legend)
+        legend_bounds.append(stage_legend.get_window_extent().bounds)
+    assert [text.get_text() for text in stage_legends[0].get_texts()] == [
+        "First",
+        "Second: A",
+        "Second: B",
+        "Note",
+    ]
+    assert [[text.get_alpha() for text in legend.get_texts()] for legend in stage_legends] == [
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0, 0.0],
+        [1.0, 1.0, 1.0, 1.0],
+    ]
+    assert legend_bounds[0] == legend_bounds[1] == legend_bounds[2]
     artifacts, states = render_artifacts(config, engine, registry, ["png", "json"])
     assert len([name for name in artifacts if name.endswith(".png")]) == 3
     assert f"{config['filename']}.json" in artifacts
