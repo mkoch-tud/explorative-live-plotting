@@ -19,7 +19,7 @@
         <small id="source-path-resolved" class="path-resolution"></small>
         <label>Format<select id="source-format"><option>auto</option><option>csv</option><option>parquet</option><option>ndjson</option><option>ipc</option></select></label>
         <label>CSV separator<input id="source-separator" maxlength="2" placeholder=", or ; or \t"></label>
-        <label>Reader options (JSON)<textarea id="source-options">{}</textarea></label>
+        <label>Reader options (JSON)<textarea id="source-options">{}</textarea><small>Schema example: <code>{"schema_overrides":{"timestamp":"Datetime"}}</code></small></label>
         <button id="add-source">Add source</button><div id="sources"></div>
       </fieldset>
       <fieldset><legend>Plot layers</legend><div id="layers"></div><button id="add-layer">Add layer</button></fieldset>

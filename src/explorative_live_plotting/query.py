@@ -31,7 +31,7 @@ OPERATORS = {
 }
 TIME_BIN = re.compile(r"[1-9]\d*(?:ns|us|ms|s|m|h|d|w|mo|q|y)")
 MAX_PLOT_ROWS = 1_000_000
-CACHE_SCHEMA_VERSION = 6
+CACHE_SCHEMA_VERSION = 7
 QUERY_FIELDS = (
     "source",
     "x_column",
@@ -211,6 +211,23 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
         scale = aggregation_options.get("scale", "fraction")
         if scale not in {"fraction", "percent"}:
             raise ConfigurationError("relative_count scale must be fraction or percent")
+    if aggregation == "relative_value":
+        denominator = aggregation_options.get("denominator")
+        if not isinstance(denominator, str) or not denominator:
+            raise ConfigurationError(
+                "relative_value requires a denominator column in aggregation options"
+            )
+        if denominator not in schema:
+            raise ConfigurationError(
+                f"relative_value denominator column does not exist in {source}: {denominator}"
+            )
+        if y_column is not None and not schema[y_column].is_numeric():
+            raise ConfigurationError("relative_value requires a numeric Y column")
+        if not schema[denominator].is_numeric():
+            raise ConfigurationError("relative_value requires a numeric denominator column")
+        scale = aggregation_options.get("scale", "fraction")
+        if scale not in {"fraction", "percent"}:
+            raise ConfigurationError("relative_value scale must be fraction or percent")
     if aggregation == "quantile":
         try:
             quantile = float(aggregation_options.get("quantile", 0.5))

@@ -25,6 +25,114 @@ MODULE_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
 PATH_VARIABLE = re.compile(r"\$\{([A-Za-z_]\w*)\}")
 SCHEMA_HEAD_ROWS = 100
 
+_SIMPLE_POLARS_DTYPES = {
+    name.casefold(): getattr(pl, name)
+    for name in (
+        "Binary",
+        "Boolean",
+        "Categorical",
+        "Date",
+        "Datetime",
+        "Duration",
+        "Float32",
+        "Float64",
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "Int128",
+        "Null",
+        "String",
+        "Time",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+    )
+    if hasattr(pl, name)
+}
+_SIMPLE_POLARS_DTYPES.update(
+    {
+        "bool": pl.Boolean,
+        "str": pl.String,
+        "utf8": pl.String,
+    }
+)
+
+
+def _reader_dtype(value: Any, option: str, column: str) -> pl.DataType:
+    """Convert a JSON-safe reader dtype description into a Polars dtype."""
+    if isinstance(value, str):
+        name = value.strip().removeprefix("pl.")
+        dtype = _SIMPLE_POLARS_DTYPES.get(name.casefold())
+        if dtype is not None:
+            return dtype
+        supported = ", ".join(sorted({item.__name__ for item in _SIMPLE_POLARS_DTYPES.values()}))
+        raise ConfigurationError(
+            f"{option}.{column} has unknown Polars type {value!r}; supported types: {supported}"
+        )
+    if isinstance(value, dict):
+        raw_name = value.get("type")
+        if not isinstance(raw_name, str):
+            raise ConfigurationError(f"{option}.{column}.type must be a Polars type name")
+        name = raw_name.removeprefix("pl.").casefold()
+        if name == "datetime":
+            allowed = {"type", "time_unit", "time_zone"}
+            unexpected = sorted(set(value) - allowed)
+            if unexpected:
+                raise ConfigurationError(
+                    f"{option}.{column} has unsupported Datetime fields: {', '.join(unexpected)}"
+                )
+            time_unit = value.get("time_unit", "us")
+            time_zone = value.get("time_zone")
+            if time_unit not in {"ns", "us", "ms"}:
+                raise ConfigurationError(
+                    f"{option}.{column}.time_unit must be one of ns, us, or ms"
+                )
+            if time_zone is not None and not isinstance(time_zone, str):
+                raise ConfigurationError(f"{option}.{column}.time_zone must be a string or null")
+            return pl.Datetime(time_unit=time_unit, time_zone=time_zone)
+        if name == "duration":
+            allowed = {"type", "time_unit"}
+            unexpected = sorted(set(value) - allowed)
+            if unexpected:
+                raise ConfigurationError(
+                    f"{option}.{column} has unsupported Duration fields: {', '.join(unexpected)}"
+                )
+            time_unit = value.get("time_unit", "us")
+            if time_unit not in {"ns", "us", "ms"}:
+                raise ConfigurationError(
+                    f"{option}.{column}.time_unit must be one of ns, us, or ms"
+                )
+            return pl.Duration(time_unit=time_unit)
+        if set(value) == {"type"}:
+            return _reader_dtype(raw_name, option, column)
+        raise ConfigurationError(
+            f"{option}.{column} only supports parameter objects for Datetime and Duration"
+        )
+    raise ConfigurationError(
+        f"{option}.{column} must be a Polars type name or a type options object"
+    )
+
+
+def normalize_reader_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Resolve JSON-safe schema declarations before passing options to Polars."""
+    normalized = dict(options)
+    for option in ("schema", "schema_overrides", "hive_schema"):
+        if option not in normalized or normalized[option] is None:
+            continue
+        declaration = normalized[option]
+        if not isinstance(declaration, dict):
+            hint = f'{{"{option}": {{"timestamp": "Datetime"}}}}'
+            raise ConfigurationError(
+                f"{option} must be a JSON object mapping column names to types; use {hint}"
+            )
+        normalized[option] = {
+            str(column): _reader_dtype(dtype, option, str(column))
+            for column, dtype in declaration.items()
+        }
+    return normalized
+
 
 @dataclass(frozen=True)
 class SourceSpec:
@@ -132,7 +240,7 @@ class DataCatalog:
         module: ModuleType | None,
         module_name: str | None,
     ) -> pl.LazyFrame:
-        options = dict(spec.options or {})
+        options = normalize_reader_options(dict(spec.options or {}))
         path = self._resolve_path(spec.path, module, module_name)
         data_format = self._format(spec, path)
         separator = options.get("separator")

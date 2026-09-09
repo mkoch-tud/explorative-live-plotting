@@ -1047,7 +1047,7 @@ def _annotation_legend_proxy(item: dict[str, Any], alpha: float) -> Any:
     color = item.get("text_color", item.get("color", "#666666"))
     kind = item.get("kind", "text")
     if kind in {"vspan", "hspan"}:
-        return Patch(facecolor=color, edgecolor=color, alpha=alpha)
+        return Patch(facecolor=color, edgecolor="none", alpha=alpha)
     return Line2D(
         [],
         [],
@@ -1771,13 +1771,19 @@ def _annotation(
         ax.axvspan(
             _annotation_x(item["x1"]),
             _annotation_x(item["x2"]),
-            color=color,
+            facecolor=color,
+            edgecolor="none",
             alpha=alpha,
             label="_nolegend_",
         )
     elif kind == "hspan":
         ax.axhspan(
-            item["y1"], item["y2"], color=color, alpha=alpha, label="_nolegend_"
+            item["y1"],
+            item["y2"],
+            facecolor=color,
+            edgecolor="none",
+            alpha=alpha,
+            label="_nolegend_",
         )
     elif kind == "text":
         _foreground_text(
@@ -1803,7 +1809,7 @@ def _annotation_legend_handle(ax, item: dict[str, Any]) -> None:
     label = item["legend_label"]
     if kind in {"vspan", "hspan"}:
         handle = mpl.patches.Rectangle(
-            (0, 0), 0, 0, facecolor=color, alpha=alpha, label=label
+            (0, 0), 0, 0, facecolor=color, edgecolor="none", alpha=alpha, label=label
         )
         ax.add_artist(handle)
         return

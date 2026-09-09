@@ -10,10 +10,28 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 
-from .data import DataCatalog, MODULE_NAME, PATH_VARIABLE
+from .data import MODULE_NAME, PATH_VARIABLE, DataCatalog, normalize_reader_options
 from .errors import ConfigurationError
 from .query import validate_layer
 from .registry import BUILTIN_AGGREGATIONS, BUILTIN_PLOTS, Registry
+
+
+def _reader_options_code(options: dict[str, Any]) -> str:
+    """Render normalized reader options as standalone Python source."""
+
+    def render(value: Any) -> str:
+        if isinstance(value, pl.DataType) or (
+            isinstance(value, type) and issubclass(value, pl.DataType)
+        ):
+            return f"pl.{value!r}"
+        if isinstance(value, dict):
+            items = ", ".join(f"{key!r}: {render(item)}" for key, item in value.items())
+            return "{" + items + "}"
+        if isinstance(value, list):
+            return "[" + ", ".join(render(item) for item in value) + "]"
+        return repr(value)
+
+    return render(normalize_reader_options(options))
 
 
 def _coerce(value: Any, dtype: pl.DataType, field: str) -> Any:
@@ -90,6 +108,16 @@ def _aggregation_code(layer: dict[str, Any]) -> str:
     if aggregation == "quantile":
         quantile = float(layer["aggregation_options"].get("quantile", 0.5))
         return f"{column}.quantile({quantile!r})"
+    if aggregation == "relative_value":
+        denominator = f"pl.col({layer['aggregation_options']['denominator']!r}).sum()"
+        multiplier = (
+            100.0 if layer["aggregation_options"].get("scale") == "percent" else 1.0
+        )
+        return (
+            f"pl.when({denominator} != 0).then("
+            f"{column}.sum().cast(pl.Float64) / {denominator} * {multiplier!r}"
+            ").otherwise(None)"
+        )
     return f"{column}.{aggregation}()"
 
 
@@ -315,12 +343,12 @@ def _annotation_code(item: dict[str, Any], axis: str = "primary") -> str:
         return (
             f"        {axis}.axvspan(_annotation_x({item['x1']!r}), "
             f"_annotation_x({item['x2']!r}), "
-            f"color={color!r}, alpha={alpha!r}, label={label!r})"
+            f"facecolor={color!r}, edgecolor='none', alpha={alpha!r}, label={label!r})"
         ) + label_code
     if kind == "hspan":
         return (
             f"        {axis}.axhspan({item['y1']!r}, {item['y2']!r}, "
-            f"color={color!r}, alpha={alpha!r}, label={label!r})"
+            f"facecolor={color!r}, edgecolor='none', alpha={alpha!r}, label={label!r})"
         ) + label_code
     if kind == "text":
         code = (
@@ -747,9 +775,9 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
             "ndjson": "scan_ndjson",
             "ipc": "scan_ipc",
         }[metadata["format"]]
-        options = dict(item.get("options") or {})
+        options = _reader_options_code(dict(item.get("options") or {}))
         source_lines.append(
-            f"    {lazy_variable} = pl.{scanner}({path_variable}, **{options!r})"
+            f"    {lazy_variable} = pl.{scanner}({path_variable}, **{options})"
         )
 
     draw_functions = [_draw_code(index, layer) for index, layer in enumerate(enabled_layers)]

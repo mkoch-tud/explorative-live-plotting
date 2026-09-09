@@ -58,6 +58,19 @@ Arrow IPC/Feather. Reader keyword arguments can be supplied as JSON when a
 source is registered in the browser. A directory or glob can represent a
 multi-file dataset where the Polars scanner supports it.
 
+Schema options use JSON strings for Polars data types. For example, force a CSV
+timestamp column to be parsed as a datetime with:
+
+```json
+{"schema_overrides": {"timestamp": "Datetime"}}
+```
+
+Both `"Datetime"` and `"pl.Datetime"` are accepted. To specify temporal details,
+use an object such as `{"type":"Datetime","time_unit":"ms","time_zone":"UTC"}`.
+Other common Polars scalar type names, including `Date`, `String`, `Boolean`,
+`Int64`, and `Float64`, work the same way. The `schema`, `schema_overrides`, and
+`hive_schema` reader options all support these JSON-safe type declarations.
+
 CSV sources have a dedicated optional separator field. Enter a single-byte
 character such as `;` or `|`, or enter `\t` for a tab. When a source is added,
 the server collects only its first 100 rows in a threaded request worker and
@@ -132,7 +145,8 @@ maximum plotted X values. A single time-bin point receives one bin of padding
 instead of Matplotlib's years-wide single-date fallback.
 
 Built-in aggregations are `none`, `sum`, `min`, `max`, `mean`, `median`, `std`,
-`var`, `first`, `last`, `count`, `relative_count`, `n_unique`, and `quantile`.
+`var`, `first`, `last`, `count`, `relative_count`, `relative_value`, `n_unique`,
+and `quantile`.
 Built-in plot renderers are line, step, scatter, bar, area, histogram, box,
 violin, stem, and hexbin. Layers can be mixed freely on primary and secondary
 axes.
@@ -147,6 +161,14 @@ to inspect high-TTL SYN packets by minute:
 - high-TTL series: the same settings plus filter `ttl gt 200`;
 - relative series: the same grouping with aggregation `relative_count`, filter
   `ttl gt 200`, and optionally percent scale.
+
+`relative_value` is intended for data that already contains aggregated count
+columns. It divides the sum of the selected Y column by the sum of another
+numeric column in every X/group bin. Select `group_by`, choose the numerator as
+Y, and set the denominator in the aggregation options. For example, to plot the
+percentage represented by `irregular_tcp_options` out of `total`, use
+`{"denominator":"total","scale":"percent"}`. A zero denominator produces a
+null value instead of infinity.
 
 ### Grouping and aggregation
 
@@ -173,6 +195,7 @@ built-in aggregation functions and their options:
 | `none` | No grouping or aggregation; raw X/Y rows | `{}` |
 | `count` | Counts rows in each group; Y is ignored | `{}` |
 | `relative_count` | Filtered row count divided by all rows in the same group; Y is ignored | `{}` for a 0–1 fraction, or `{"scale":"percent"}` for 0–100 |
+| `relative_value` | Sum of Y divided by the sum of another numeric column | `{"denominator":"total"}` for a 0–1 fraction, optionally with `"scale":"percent"` for 0–100 |
 | `sum`, `min`, `max`, `mean`, `median`, `std`, `var` | Selected Y column | `{}` |
 | `first`, `last` | First or last Y value in each group | `{}` |
 | `n_unique` | Number of unique Y values in each group | `{}` |
@@ -236,7 +259,7 @@ object.
 ### Built-in plot options JSON
 
 Plot options are renderer-specific and do not control styling. Use the visible
-Color, Opacity, Marker, and Line width controls for style. JSON uses double
+Color, Opacity, Marker, Marker size, Line width, and Line style controls for style. JSON uses double
 quotes and lowercase `true`/`false` values.
 
 | Plot type | Supported plot options |

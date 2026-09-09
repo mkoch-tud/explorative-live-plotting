@@ -28,6 +28,7 @@ BUILTIN_AGGREGATIONS = {
     "last",
     "count",
     "relative_count",
+    "relative_value",
     "n_unique",
     "quantile",
 }
@@ -205,6 +206,16 @@ def builtins() -> Registry:
     # QueryEngine handles the denominator before applying layer filters.  Keeping
     # this registered expression preserves the public aggregation registry API.
     registry.aggregation("relative_count", lambda column, options: pl.len())
+    registry.aggregation(
+        "relative_value",
+        lambda column, options: pl.when(pl.col(options["denominator"]).sum() != 0)
+        .then(
+            _value(column).sum().cast(pl.Float64)
+            / pl.col(options["denominator"]).sum()
+            * (100.0 if options.get("scale") == "percent" else 1.0)
+        )
+        .otherwise(None),
+    )
     registry.aggregation("n_unique", lambda column, options: _value(column).n_unique())
     registry.aggregation(
         "quantile",
