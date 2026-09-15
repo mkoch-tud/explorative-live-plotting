@@ -258,6 +258,7 @@ function updateBrokenYAxisState() {
 
 function renderSources() {
   $('sources').innerHTML = '';
+  $('source-count').textContent = `${bootstrap.sources.length} registered`;
   for (const item of bootstrap.sources) {
     const div = document.createElement('div');
     div.className = 'source';
@@ -413,12 +414,19 @@ function filterGroup(layer, group, siblings, index) {
 }
 
 function renderLayers() {
-  $('layers').innerHTML = '';
+  const root = $('layers');
+  const expandedAdvanced = new Set(
+    [...root.querySelectorAll('.layer-advanced[open]')]
+      .map(details => details.closest('.layer')?.dataset.layerId),
+  );
+  root.innerHTML = '';
+  $('layer-count').textContent = `${config.layers.length} configured`;
   config.layers.forEach((layer, index) => {
     layer.style ??= {}; layer.filters ??= []; layer.aggregation_options ??= {}; layer.options ??= {};
     layer.style.color ??= STD_COLORS[index % STD_COLORS.length];
     const card = document.createElement('div');
     card.className = 'layer';
+    card.dataset.layerId = layer.id;
     const names = bootstrap.sources.map(x => x.name);
     const cols = columns(layer.source);
     if (cols.length) {
@@ -433,6 +441,25 @@ function renderLayers() {
     const aggregations = bootstrap.registry.aggregations.filter(value => value !== 'none');
     const groupingOptions = `<option value="none" ${grouping === 'none' ? 'selected' : ''}>none (raw rows)</option><option value="group_by" ${grouping === 'group_by' ? 'selected' : ''}>group_by</option><option value="group_by_dynamic" ${grouping === 'group_by_dynamic' ? 'selected' : ''}>group_by_dynamic</option>`;
     card.innerHTML = `<div class="layer-head"><input class="enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}><input class="label" value="${escapeHtml(layer.label)}"><button class="remove">×</button></div><div class="grid plot-basics"><label>Source<select class="source-select">${option(names, layer.source)}</select></label><label>Plot type<select class="plot-type">${option(bootstrap.registry.plot_types, layer.plot_type)}</select></label><label>Color${colorPalette(selectedColor)}</label></div><div class="grid axis-columns"><label><span>${xLabel} ${info('X supplies the horizontal values. With group_by it is the grouping key; with group_by_dynamic it must be a Date or Datetime column.')}</span><select class="x-column">${option(cols, layer.x_column, true)}</select></label><label><span>Y/value column ${info('The selected aggregation function is applied to this column. count and relative_count count rows and therefore ignore Y.')}</span><select class="y-column">${option(cols, layer.y_column, true)}</select></label></div><div class="grouping-panel"><div class="grid grouping-grid"><label><span>Grouping method ${info('none plots raw rows; group_by combines equal X values; group_by_dynamic creates regular time bins from the Time/X column.')}</span><select class="grouping-method">${groupingOptions}</select></label><label class="time-every" ${grouping === 'group_by_dynamic' ? '' : 'hidden'}><span>Every ${info('Width of each time bin, for example 1s, 1m, 5m, 1h, 1d, 1w, or 1mo.')}</span><input class="time-bin" list="time-bins" placeholder="1m" value="${escapeHtml(layer.time_bin ?? '1m')}"></label><label><span>Aggregate Y with ${info('The function is applied to Y inside every X group or time bin. count and relative_count operate on rows instead.')}</span><select class="aggregation" ${grouping === 'none' ? 'disabled' : ''}>${option(aggregations, layer.aggregation === 'none' ? 'sum' : layer.aggregation)}</select></label></div><small>${groupingText}</small></div><div class="grid"><label><span>Split series by / color ${info('Optional categorical column. Each distinct value becomes a separate plotted series and legend entry; when aggregating, it is an additional grouping key.')}</span><select class="group-column">${option(cols, layer.group_column, true)}</select></label><label>Sort<select class="sort">${option(['none', 'x_ascending', 'x_descending', 'y_ascending', 'y_descending'], layer.sort)}</select></label><label>Input row limit<input class="limit" type="number" min="1" value="${layer.limit ?? ''}"></label><label><span>Result limit ${info('Applied after filtering, aggregation, and sorting. Use this for ranked top-N plots; Input row limit instead bounds raw data loading.')}</span><input class="result-limit" type="number" min="1" value="${layer.result_limit ?? ''}"></label><label>Result Y min<input class="result-y-min" type="number" step="any" value="${layer.result_y_min ?? ''}"></label><label>Result Y max<input class="result-y-max" type="number" step="any" value="${layer.result_y_max ?? ''}"></label><label>Opacity<input class="alpha" type="number" min="0" max="1" step="0.05" value="${layer.style.alpha ?? 1}"></label><label>Marker<select class="marker">${option(['none', 'o', 's', '^', 'v', 'D', 'x', '+', '*'], layer.style.marker ?? 'none')}</select></label><label>Line width<input class="linewidth" type="number" step=".1" value="${layer.style.linewidth ?? 1.5}"></label></div><div class="checks"><label><input class="stacked" type="checkbox" ${layer.stacked ? 'checked' : ''}> Stacked</label><label><input class="secondary" type="checkbox" ${layer.secondary_y ? 'checked' : ''}> Secondary y</label><label><input class="fix-x-values" type="checkbox" ${layer.fix_x_values ? 'checked' : ''}> Fix shared X values from this layer ${info('This layer defines the ordered X domain after its filters, aggregation, sorting, and result limit. Every other layer is filtered and aligned to that domain.')}</label></div><label><span>Aggregation options (JSON) ${info('quantile, relative_count, and relative_value accept built-in options. See the examples below and the README for the complete list.')}</span><textarea class="aggregation-options">${escapeHtml(JSON.stringify(layer.aggregation_options))}</textarea></label><small>Examples: {"quantile":0.95}; {"scale":"percent"} for relative_count; or {"denominator":"total","scale":"percent"} for relative_value.</small><label><span>Plot options (JSON) ${info('Renderer-specific settings. Styling such as color, opacity, marker, and line width uses the controls above.')}</span><textarea class="plot-options">${escapeHtml(JSON.stringify(layer.options))}</textarea></label><small>Examples: histogram {"bins":50,"density":true}; step {"where":"pre"}; hexbin {"gridsize":40}.</small><div class="filter-editor"><div class="filter-editor-head"><strong>Filters</strong>${info('The root combines its conditions and nested groups. Every nested group can independently use AND or OR.') }<label>Root match<select class="filter-logic">${option(['and', 'or'], layer.filter_logic)}</select></label><button class="add-filter" type="button">+ condition</button><button class="add-filter-group" type="button">+ nested group</button></div><div class="filters"></div></div>`;
+    const groupLabel = card.querySelector('.group-column').closest('label');
+    card.querySelector('.grouping-grid').appendChild(groupLabel);
+    const groupingPanel = card.querySelector('.grouping-panel');
+    const advanced = document.createElement('details');
+    advanced.className = 'layer-advanced';
+    advanced.open = expandedAdvanced.has(String(layer.id));
+    const advancedStatus = [];
+    const filterCount = filterConditions(layer.filters).length;
+    if (filterCount) advancedStatus.push(`${filterCount} filter${filterCount === 1 ? '' : 's'}`);
+    if (layer.limit || layer.result_limit) advancedStatus.push('limited');
+    if (layer.secondary_y) advancedStatus.push('secondary Y');
+    if (layer.stacked) advancedStatus.push('stacked');
+    const advancedSummary = document.createElement('summary');
+    advancedSummary.innerHTML = `<span>Filters, limits & styling</span><span class="section-meta">${advancedStatus.join(' · ') || 'Optional'}</span>`;
+    const advancedBody = document.createElement('div');
+    advancedBody.className = 'layer-advanced-body';
+    while (groupingPanel.nextSibling) advancedBody.appendChild(groupingPanel.nextSibling);
+    advanced.append(advancedSummary, advancedBody);
+    card.appendChild(advanced);
     card.querySelector('.marker').closest('label').insertAdjacentHTML(
       'afterend',
       `<label>Marker size<input class="markersize" type="number" min="0" step=".5" value="${escapeHtml(layer.style.markersize ?? 4)}"></label>`,
@@ -513,7 +540,7 @@ function renderLayers() {
       layer.filters.push(newFilterGroup(layer));
       renderLayers(); changed(true);
     };
-    $('layers').appendChild(card);
+    root.appendChild(card);
   });
 }
 
@@ -536,6 +563,7 @@ function syncAnnotationJson() { $('annotations').value = JSON.stringify(config.a
 
 function renderAnnotations() {
   const root = $('annotation-editors'); root.innerHTML = '';
+  $('annotation-count').textContent = `${config.annotations.length} configured`;
   config.annotations.forEach((item, index) => {
     const card = document.createElement('div'); card.className = 'annotation';
     const coordinateFields = annotationCoordinates(item.kind).map(field => coordinateEditor(item, field)).join('');
@@ -608,6 +636,9 @@ function generateDefaultStages(render = true) {
 }
 function renderStages() {
   const root = $('stages'); root.innerHTML = '';
+  $('stage-count').textContent = config.stages.enabled
+    ? `${config.stages.steps.length} configured`
+    : 'Off';
   const available = stageElements();
   (config.stages.steps ?? []).forEach((step, index) => {
     const card = document.createElement('div'); card.className = 'stage';
