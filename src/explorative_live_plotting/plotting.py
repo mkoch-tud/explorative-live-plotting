@@ -1111,7 +1111,12 @@ def _stage_legend_entries(
     return handles, labels, visibility
 
 
-def build_figure(config: dict[str, Any], engine: QueryEngine, registry: Registry):
+def build_figure(
+    config: dict[str, Any],
+    engine: QueryEngine,
+    registry: Registry,
+    stage_layout: dict[str, Any] | None = None,
+):
     figure = config["figure"]
     global_font_size = float(figure["font_size"])
     label_font_size = (
@@ -1414,15 +1419,28 @@ def build_figure(config: dict[str, Any], engine: QueryEngine, registry: Registry
                     float(config["legend"]["bbox_x"]),
                     float(config["legend"]["bbox_y"]),
                 )
+            fixed_legend = (
+                stage_layout is not None
+                and stage_layout["legend"] is not None
+                and legend_visibility is not None
+            )
+            if fixed_legend:
+                # The reference plot resolves "best" and custom anchors once.
+                # A figure-relative anchor is unaffected by later stage axes layouts.
+                legend_options.update(
+                    loc="lower left",
+                    bbox_to_anchor=(0, 0),
+                    bbox_transform=fig.transFigure,
+                )
+            legend_axis = primary_axes[0] if broken_y["enabled"] else primary
+            created_legend = legend_axis.legend(handles, labels, **legend_options)
+            if fixed_legend:
+                created_legend.set_in_layout(False)
             if legend_visibility is not None:
-                created_legend = fig.legend(handles, labels, **legend_options)
                 for text, visible in zip(
                     created_legend.get_texts(), legend_visibility, strict=True
                 ):
                     text.set_alpha(1.0 if visible else 0.0)
-            else:
-                legend_axis = primary_axes[0] if broken_y["enabled"] else primary
-                created_legend = legend_axis.legend(handles, labels, **legend_options)
     if figure["font_family"] == "monospace":
         for text in fig.findobj(match=plt.Text):
             text.set_fontfamily("monospace")
@@ -1430,6 +1448,24 @@ def build_figure(config: dict[str, Any], engine: QueryEngine, registry: Registry
         fig.subplots_adjust(hspace=float(broken_y["gap"]))
     else:
         fig.tight_layout()
+    if stage_layout is not None:
+        if len(fig.axes) == len(stage_layout["axes"]):
+            for axis, position in zip(fig.axes, stage_layout["axes"], strict=True):
+                axis.set_position(position)
+        if config["legend"]["enabled"] and stage_layout["legend"] is not None:
+            legend_axis = primary_axes[0] if broken_y["enabled"] else primary
+            legend = legend_axis.get_legend()
+            if legend is not None:
+                fig.canvas.draw()
+                current = legend.get_window_extent(fig.canvas.get_renderer())
+                target_x, target_y = stage_layout["legend"]
+                legend.set_bbox_to_anchor(
+                    (
+                        target_x - current.x0 / fig.bbox.width,
+                        target_y - current.y0 / fig.bbox.height,
+                    ),
+                    transform=fig.transFigure,
+                )
     return fig, cache_states
 
 
@@ -1922,6 +1958,37 @@ def _annotation_label(
         )
 
 
+def _stage_reference_layout(
+    config: dict[str, Any], engine: QueryEngine, registry: Registry
+) -> dict[str, Any]:
+    """Measure the complete plot once so every stage uses the same layout."""
+    reference, _ = build_figure(config, engine, registry)
+    try:
+        reference.set_dpi(int(config["figure"]["dpi"]))
+        reference.canvas.draw()
+        renderer = reference.canvas.get_renderer()
+        legend = next(
+            (axis.get_legend() for axis in reference.axes if axis.get_legend() is not None),
+            None,
+        )
+        legend_position = None
+        if legend is not None:
+            bounds = legend.get_window_extent(renderer)
+            legend_position = (
+                bounds.x0 / reference.bbox.width,
+                bounds.y0 / reference.bbox.height,
+            )
+        return {
+            "axes": [tuple(axis.get_position().bounds) for axis in reference.axes],
+            "legend": legend_position,
+            "bbox_inches": reference.get_tightbbox(renderer).padded(
+                float(mpl.rcParams["savefig.pad_inches"])
+            ),
+        }
+    finally:
+        plt.close(reference)
+
+
 def render_artifacts(
     config: dict[str, Any],
     engine: QueryEngine,
@@ -1936,8 +2003,13 @@ def render_artifacts(
     plot_formats = [item for item in formats if item != "json"]
     if not plot_formats:
         return artifacts, cache_states
+    stage_layout = (
+        _stage_reference_layout(config, engine, registry)
+        if config["stages"]["enabled"]
+        else None
+    )
     for suffix, stage_label, stage_config in _stage_configs(config):
-        fig, current_states = build_figure(stage_config, engine, registry)
+        fig, current_states = build_figure(stage_config, engine, registry, stage_layout)
         cache_states.extend(
             {**item, **({"stage": stage_label} if stage_label else {})}
             for item in current_states
@@ -1949,7 +2021,7 @@ def render_artifacts(
                     buffer,
                     format=output_format,
                     dpi=int(config["figure"]["dpi"]),
-                    bbox_inches="tight",
+                    bbox_inches=stage_layout["bbox_inches"] if stage_layout else "tight",
                 )
                 filename = f"{config['filename']}{suffix}.{output_format}"
                 artifacts[filename] = buffer.getvalue()
@@ -2001,8 +2073,6 @@ def _stage_configs(config: dict[str, Any]) -> list[tuple[str, str | None, dict[s
             and f"annotation:{annotation['id']}" in staged_element_ids
         ]
         stage["_stage_legend_elements"] = deepcopy(selected)
-        if stage["legend"]["loc"] == "best":
-            stage["legend"]["loc"] = "upper right"
         stage["layers"] = []
         stage_color_index = 0
         for layer in config["layers"]:
