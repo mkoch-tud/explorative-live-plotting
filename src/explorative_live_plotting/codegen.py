@@ -990,6 +990,30 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
         if broken_y["enabled"]
         else "    fig.tight_layout()"
     )
+    if (
+        config["legend"]["enabled"]
+        and config["legend"]["loc"] == "upper center"
+        and config["legend"]["bbox_enabled"]
+        and config["legend"]["bbox_x"] == 0.5
+        and config["legend"]["bbox_y"] == 1.2
+    ):
+        main_lines.extend(
+            [
+                f"    legend_axis = {'primary_axes[0]' if broken_y['enabled'] else 'primary'}",
+                "    placed_legend = legend_axis.get_legend()",
+                "    if placed_legend is not None:",
+                "        fig.canvas.draw()",
+                "        renderer = fig.canvas.get_renderer()",
+                "        axis_bounds = legend_axis.get_window_extent(renderer)",
+                "        legend_bounds = placed_legend.get_window_extent(renderer)",
+                "        rise = max(0.0, axis_bounds.y1 + fig.dpi * 4 / 72 - legend_bounds.y0)",
+                "        if rise:",
+                "            placed_legend.set_bbox_to_anchor(",
+                "                (0.5, 1.2 + rise / axis_bounds.height),",
+                "                transform=legend_axis.transAxes,",
+                "            )",
+            ]
+        )
     main_lines.append("    try:")
     for output_format in plot_formats:
         output = f"{config['filename']}.{output_format}"

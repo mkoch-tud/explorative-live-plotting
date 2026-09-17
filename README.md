@@ -330,8 +330,10 @@ optional `bbox_to_anchor` X/Y coordinates, handle length, column count, and
 frame opacity. **Spacing between columns** maps to Matplotlib's `columnspacing`,
 while **Spacing between handle and label** maps to `handletextpad`; both are
 measured in units of the legend font size and update live without recalculating
-layer data. New plots default to `upper left`, handle length `1.5`, column
-spacing `0.8`, handle-to-label spacing `0.5`, and bbox X `0.115`.
+layer data. New plots place the legend above the plot with `upper center` and
+`bbox_to_anchor=(0.5, 1.2)` by default. Handle length defaults to `1.5`, column
+spacing to `0.8`, and handle-to-label spacing to `0.5`. If several legend rows
+would overlap the axes, the default placement is lifted to keep a small gap.
 
 The configuration panel starts wider than before and can be resized by dragging
 the divider between the controls and preview. Its width is remembered locally;

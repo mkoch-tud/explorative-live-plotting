@@ -758,11 +758,11 @@ function apply(next) {
   $('tick-font-size').value = axes.tick_font_size ?? config.figure.font_size ?? 12;
   $('legend-font-override').checked = config.legend.font_size_override ?? false;
   $('legend-font-size').value = config.legend.font_size ?? config.figure.font_size ?? 12;
-  $('legend-loc').value = config.legend.loc ?? 'upper left';
+  $('legend-loc').value = config.legend.loc ?? 'upper center';
   $('legend-ncols').value = config.legend.ncols ?? 1;
-  $('legend-bbox-enabled').checked = config.legend.bbox_enabled ?? false;
-  $('legend-bbox-x').value = config.legend.bbox_x ?? 0.115;
-  $('legend-bbox-y').value = config.legend.bbox_y ?? 1;
+  $('legend-bbox-enabled').checked = config.legend.bbox_enabled ?? true;
+  $('legend-bbox-x').value = config.legend.bbox_x ?? 0.5;
+  $('legend-bbox-y').value = config.legend.bbox_y ?? 1.2;
   $('legend-handlelength').value = config.legend.handlelength ?? 1.5;
   $('legend-columnspacing').value = config.legend.columnspacing ?? 0.8;
   $('legend-handletextpad').value = config.legend.handletextpad ?? 0.5;

@@ -105,11 +105,11 @@ def default_config(config_module: str | None = None) -> dict[str, Any]:
         },
         "legend": {
             "enabled": True,
-            "loc": "upper left",
+            "loc": "upper center",
             "ncols": 1,
-            "bbox_enabled": False,
-            "bbox_x": 0.115,
-            "bbox_y": 1.0,
+            "bbox_enabled": True,
+            "bbox_x": 0.5,
+            "bbox_y": 1.2,
             "handlelength": 1.5,
             "columnspacing": 0.8,
             "handletextpad": 0.5,
@@ -1428,7 +1428,11 @@ def build_figure(
                 # The reference plot resolves "best" and custom anchors once.
                 # A figure-relative anchor is unaffected by later stage axes layouts.
                 legend_options.update(
-                    loc="lower left",
+                    loc=(
+                        "lower center"
+                        if stage_layout["legend_centered"]
+                        else "lower left"
+                    ),
                     bbox_to_anchor=(0, 0),
                     bbox_transform=fig.transFigure,
                 )
@@ -1448,6 +1452,28 @@ def build_figure(
         fig.subplots_adjust(hspace=float(broken_y["gap"]))
     else:
         fig.tight_layout()
+    if (
+        stage_layout is None
+        and config["legend"]["enabled"]
+        and config["legend"]["loc"] == "upper center"
+        and config["legend"]["bbox_enabled"]
+        and config["legend"]["bbox_x"] == 0.5
+        and config["legend"]["bbox_y"] == 1.2
+    ):
+        legend_axis = primary_axes[0] if broken_y["enabled"] else primary
+        legend = legend_axis.get_legend()
+        if legend is not None:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            axis_bounds = legend_axis.get_window_extent(renderer)
+            legend_bounds = legend.get_window_extent(renderer)
+            gap = fig.dpi * 4 / 72  # four points of clear space above the axes
+            rise = max(0.0, axis_bounds.y1 + gap - legend_bounds.y0)
+            if rise:
+                legend.set_bbox_to_anchor(
+                    (0.5, 1.2 + rise / axis_bounds.height),
+                    transform=legend_axis.transAxes,
+                )
     if stage_layout is not None:
         if len(fig.axes) == len(stage_layout["axes"]):
             for axis, position in zip(fig.axes, stage_layout["axes"], strict=True):
@@ -1459,9 +1485,14 @@ def build_figure(
                 fig.canvas.draw()
                 current = legend.get_window_extent(fig.canvas.get_renderer())
                 target_x, target_y = stage_layout["legend"]
+                current_x = (
+                    current.x0 + current.width / 2
+                    if stage_layout["legend_centered"]
+                    else current.x0
+                )
                 legend.set_bbox_to_anchor(
                     (
-                        target_x - current.x0 / fig.bbox.width,
+                        target_x - current_x / fig.bbox.width,
                         target_y - current.y0 / fig.bbox.height,
                     ),
                     transform=fig.transFigure,
@@ -1971,16 +2002,24 @@ def _stage_reference_layout(
             (axis.get_legend() for axis in reference.axes if axis.get_legend() is not None),
             None,
         )
+        centered_legend = (
+            config["legend"]["loc"] == "upper center"
+            and config["legend"]["bbox_enabled"]
+            and config["legend"]["bbox_x"] == 0.5
+            and config["legend"]["bbox_y"] == 1.2
+        )
         legend_position = None
         if legend is not None:
             bounds = legend.get_window_extent(renderer)
             legend_position = (
-                bounds.x0 / reference.bbox.width,
+                (bounds.x0 + bounds.width / 2 if centered_legend else bounds.x0)
+                / reference.bbox.width,
                 bounds.y0 / reference.bbox.height,
             )
         return {
             "axes": [tuple(axis.get_position().bounds) for axis in reference.axes],
             "legend": legend_position,
+            "legend_centered": centered_legend,
             "bbox_inches": reference.get_tightbbox(renderer).padded(
                 float(mpl.rcParams["savefig.pad_inches"])
             ),
