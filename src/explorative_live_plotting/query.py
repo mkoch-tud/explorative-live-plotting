@@ -30,8 +30,17 @@ OPERATORS = {
     "is_not_null",
 }
 TIME_BIN = re.compile(r"[1-9]\d*(?:ns|us|ms|s|m|h|d|w|mo|q|y)")
+WEEKDAYS = {
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+}
 MAX_PLOT_ROWS = 1_000_000
-CACHE_SCHEMA_VERSION = 8
+CACHE_SCHEMA_VERSION = 9
 QUERY_FIELDS = (
     "source",
     "x_column",
@@ -40,6 +49,7 @@ QUERY_FIELDS = (
     "aggregation",
     "aggregation_options",
     "time_bin",
+    "time_bin_start_by",
     "filter_logic",
     "base_filter_expression",
     "filter_expression",
@@ -152,6 +162,18 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
     plot_type = raw.get("plot_type", "line")
     aggregation = raw.get("aggregation", "none")
     time_bin = str(raw.get("time_bin") or "").strip() or None
+    raw_options = raw.get("options", {})
+    legacy_start_by = (
+        raw_options.get("start_by") if isinstance(raw_options, dict) else None
+    )
+    time_bin_start_by = str(
+        raw.get("time_bin_start_by", legacy_start_by) or "monday"
+    ).strip().lower()
+    if time_bin_start_by not in WEEKDAYS:
+        raise ConfigurationError(
+            "time bin start weekday must be monday, tuesday, wednesday, thursday, "
+            "friday, saturday, or sunday"
+        )
     x_column = raw.get("x_column") or None
     y_column = raw.get("y_column") or None
     group_column = raw.get("group_column") or None
@@ -252,12 +274,14 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
         if not math.isfinite(quantile) or not 0 <= quantile <= 1:
             raise ConfigurationError("quantile must be a number between 0 and 1")
         aggregation_options["quantile"] = quantile
-    raw_options = raw.get("options", {})
     if raw_options is None:
         raw_options = {}
     if not isinstance(raw_options, dict):
         raise ConfigurationError("plot options must be a JSON object")
     options = dict(raw_options)
+    # Older configurations placed this query option in renderer options. Keep
+    # them working while exposing the setting as a first-class layer field.
+    options.pop("start_by", None)
     if plot_type == "step" and options.get("where", "post") not in {"pre", "post", "mid"}:
         raise ConfigurationError("step where must be pre, post, or mid")
     if plot_type == "histogram":
@@ -321,6 +345,7 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
         "aggregation": aggregation,
         "aggregation_options": aggregation_options,
         "time_bin": time_bin,
+        "time_bin_start_by": time_bin_start_by,
         "filter_logic": filter_logic,
         "base_filter_expression": base_filter_expression,
         "filter_expression": filter_expression,
@@ -349,7 +374,8 @@ class QueryEngine:
     def execute(self, raw_layer: dict[str, Any]) -> tuple[pl.DataFrame, dict[str, Any], str]:
         layer = validate_layer(raw_layer, self.catalog, self.registry)
         grouping = (
-            f"group_by_dynamic(x={layer['x_column']}, every={layer['time_bin']})"
+            f"group_by_dynamic(x={layer['x_column']}, every={layer['time_bin']}, "
+            f"start_by={layer['time_bin_start_by']})"
             if layer["time_bin"]
             else f"group_by(x={layer['x_column']})"
             if layer["aggregation"] != "none"
@@ -391,15 +417,10 @@ class QueryEngine:
             # the raw input read rather than merely trimming the plotted result.
             base = base.limit(layer["limit"])
         schema = self.catalog.schema(layer["source"])
-        if layer["fixed_x_values"] is not None:
-            fixed_expression = (
-                pl.col(layer["x_column"])
-                .dt.truncate(layer["time_bin"])
-                .is_in(layer["fixed_x_values"])
-                if layer["time_bin"]
-                else pl.col(layer["x_column"]).is_in(layer["fixed_x_values"])
+        if layer["fixed_x_values"] is not None and not layer["time_bin"]:
+            base = base.filter(
+                pl.col(layer["x_column"]).is_in(layer["fixed_x_values"])
             )
-            base = base.filter(fixed_expression)
         required_expressions = [
             _filter_expression(item, schema) for item in layer["required_filters"]
         ]
@@ -474,30 +495,40 @@ class QueryEngine:
         return lazy
 
     @staticmethod
-    def _group_keys(lazy: pl.LazyFrame, layer: dict[str, Any]) -> tuple[pl.LazyFrame, list[str]]:
+    def _grouped(
+        lazy: pl.LazyFrame, layer: dict[str, Any], aggregation: pl.Expr
+    ) -> tuple[pl.LazyFrame, list[str]]:
+        """Apply regular or calendar-aware dynamic grouping and return join keys."""
         x_column = layer["x_column"]
-        keys: list[str] = []
-        if x_column:
-            if layer["time_bin"]:
-                lazy = lazy.with_columns(
-                    pl.col(x_column).dt.truncate(layer["time_bin"]).alias("_time_bin")
-                )
-                keys.append("_time_bin")
-            else:
-                keys.append(x_column)
-        if layer["group_column"]:
-            keys.append(layer["group_column"])
-        return lazy, keys
+        group_column = layer["group_column"]
+        if layer["time_bin"]:
+            group_options: dict[str, Any] = {
+                "every": layer["time_bin"],
+                "start_by": layer["time_bin_start_by"],
+            }
+            if group_column:
+                group_options["group_by"] = group_column
+            # Polars dynamic windows require the time index to be ascending.
+            # Sorting here also keeps loaded files that are not pre-sorted correct.
+            grouped = (
+                lazy.sort(x_column)
+                .group_by_dynamic(x_column, **group_options)
+                .agg(aggregation)
+            )
+            return grouped, [column for column in (x_column, group_column) if column]
+        keys = [column for column in (x_column, group_column) if column]
+        if not keys:
+            return lazy.select(aggregation), []
+        return lazy.group_by(keys).agg(aggregation), keys
 
     @classmethod
     def _aggregate(
         cls, lazy: pl.LazyFrame, layer: dict[str, Any], aggregation: pl.Expr
     ) -> pl.LazyFrame:
-        lazy, keys = cls._group_keys(lazy, layer)
+        lazy, keys = cls._grouped(lazy, layer, aggregation)
         if not keys:
-            return lazy.select(aggregation).with_row_index("_x", offset=1)
-        lazy = lazy.group_by(keys).agg(aggregation)
-        x_key = "_time_bin" if layer["time_bin"] else layer["x_column"]
+            return lazy.with_row_index("_x", offset=1)
+        x_key = layer["x_column"]
         selections = [pl.col(x_key).alias("_x")]
         if layer["group_column"]:
             selections.append(pl.col(layer["group_column"]).cast(pl.String).alias("_group"))
@@ -508,21 +539,21 @@ class QueryEngine:
         cls, base: pl.LazyFrame, filtered: pl.LazyFrame, layer: dict[str, Any]
     ) -> pl.LazyFrame:
         """Count filtered rows divided by all rows in each x/group bin."""
-        denominator, keys = cls._group_keys(base, layer)
-        numerator, _ = cls._group_keys(filtered, layer)
         multiplier = 100.0 if layer["aggregation_options"].get("scale") == "percent" else 1.0
+        denominator, keys = cls._grouped(
+            base, layer, pl.len().alias("_denominator")
+        )
+        numerator, _ = cls._grouped(
+            filtered, layer, pl.len().alias("_numerator")
+        )
         if not keys:
-            return denominator.select(pl.len().alias("_denominator")).join(
-                numerator.select(pl.len().alias("_numerator")), how="cross"
-            ).select(
+            return denominator.join(numerator, how="cross").select(
                 (
                     pl.col("_numerator").cast(pl.Float64)
                     / pl.col("_denominator")
                     * multiplier
                 ).alias("_y")
             ).with_row_index("_x", offset=1)
-        denominator = denominator.group_by(keys).agg(pl.len().alias("_denominator"))
-        numerator = numerator.group_by(keys).agg(pl.len().alias("_numerator"))
         result = denominator.join(numerator, on=keys, how="left").with_columns(
             (
                 pl.col("_numerator").fill_null(0).cast(pl.Float64)
@@ -530,7 +561,7 @@ class QueryEngine:
                 * multiplier
             ).alias("_y")
         )
-        x_key = "_time_bin" if layer["time_bin"] else layer["x_column"]
+        x_key = layer["x_column"]
         selections = [pl.col(x_key).alias("_x")]
         if layer["group_column"]:
             selections.append(pl.col(layer["group_column"]).cast(pl.String).alias("_group"))

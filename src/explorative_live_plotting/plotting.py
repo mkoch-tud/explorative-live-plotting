@@ -478,6 +478,13 @@ def _migrate_legacy_line(
         "aggregation": raw.get("aggregation", "none"),
         "aggregation_options": deepcopy(raw.get("aggregation_options") or {}),
         "time_bin": raw.get("time_bin") or None,
+        "time_bin_start_by": raw.get("time_bin_start_by")
+        or (
+            raw["options"].get("start_by")
+            if isinstance(raw.get("options"), dict)
+            else None
+        )
+        or "monday",
         "filter_logic": raw.get("filter_logic", "and"),
         "required_filters": required_filters,
         "filters": filters,
@@ -1235,6 +1242,7 @@ def build_figure(
                 "grouping": grouping,
                 "aggregation": layer["aggregation"],
                 "every": layer["time_bin"],
+                "start_by": layer["time_bin_start_by"] if layer["time_bin"] else None,
             }
         )
         default_color = STD_COLORS[color_index % len(STD_COLORS)]

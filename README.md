@@ -173,8 +173,10 @@ Each plot is composed of independent layers. A layer selects:
 
 When X is a date or datetime column, select **group_by_dynamic** and set
 **Every** to a Polars-style duration such as `1m`, `5m`, `1h`, `1d`, `1w`,
-`1mo`, or `1y`. The timestamp is truncated to the start of each non-overlapping
-interval before the selected aggregation is applied to Y.
+`1mo`, or `1y`. For weekly bins, **Week starts on** selects any weekday as the
+anchor and defaults to Monday. For example, Thursday-anchored weeks use
+`"time_bin": "1w"` together with `"time_bin_start_by": "thursday"`. The
+selected aggregation is applied to Y inside each non-overlapping interval.
 This remains part of the lazy query, so raw rows are not collected in the UI.
 Time-binned plots automatically use date-aware ticks that adapt from dates down
 to hours, minutes, seconds, and fractions as appropriate for the visible span.
@@ -223,7 +225,8 @@ The layer editor exposes the query order explicitly:
    is applied to the selected Y values inside each X group.
 3. **group_by_dynamic** requires a Date or Datetime X column. **Every** truncates
    that time to regular bins such as `1s`, `1m`, `5m`, `1h`, `1d`, `1w`, or
-   `1mo`; the aggregation function is applied to Y inside each bin.
+   `1mo`; the aggregation function is applied to Y inside each bin. Weekly bins
+   start on Monday unless another weekday is selected with **Week starts on**.
 
 **Split series by / color** is independent of the X grouping. Selecting a
 categorical column creates one plotted series and legend entry per distinct

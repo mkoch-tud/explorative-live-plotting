@@ -162,26 +162,36 @@ def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema:
         if x_column is None:
             lines.append(f"    {variable} = {variable}.with_row_index('_x', offset=1)")
     else:
-        x_key = "_time_bin" if layer["time_bin"] else x_column
+        x_key = x_column
+        groups = [column for column in (x_column, group_column) if column]
+        dynamic_group = ""
         if layer["time_bin"]:
-            truncate = (
-                f"pl.col({x_column!r}).dt.truncate({layer['time_bin']!r})"
-                ".alias('_time_bin')"
+            by = f", group_by={group_column!r}" if group_column else ""
+            dynamic_group = (
+                f"sort({x_column!r}).group_by_dynamic({x_column!r}, "
+                f"every={layer['time_bin']!r}, "
+                f"start_by={layer['time_bin_start_by']!r}{by})"
             )
-            lines.append(f"    {variable} = {variable}.with_columns({truncate})")
-            if layer["aggregation"] == "relative_count":
-                lines.append(f"    {all_variable} = {all_variable}.with_columns({truncate})")
-        groups = [column for column in (x_key, group_column) if column]
         if layer["aggregation"] == "relative_count":
             multiplier = (
                 100.0 if layer["aggregation_options"].get("scale") == "percent" else 1.0
             )
             if groups:
+                denominator_group = (
+                    f"{all_variable}.{dynamic_group}"
+                    if dynamic_group
+                    else f"{all_variable}.group_by({groups!r})"
+                )
+                numerator_group = (
+                    f"{variable}.{dynamic_group}"
+                    if dynamic_group
+                    else f"{variable}.group_by({groups!r})"
+                )
                 lines.extend(
                     [
-                        f"    {all_variable} = {all_variable}.group_by({groups!r}).agg("
+                        f"    {all_variable} = {denominator_group}.agg("
                         "pl.len().alias('_denominator'))",
-                        f"    {variable} = {variable}.group_by({groups!r}).agg("
+                        f"    {variable} = {numerator_group}.agg("
                         "pl.len().alias('_numerator'))",
                         f"    {variable} = {all_variable}.join({variable}, on={groups!r}, "
                         "how='left').with_columns((pl.col('_numerator').fill_null(0).cast("
@@ -202,7 +212,12 @@ def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema:
         else:
             aggregation = _aggregation_code(layer) + ".alias('_y')"
             if groups:
-                lines.append(f"    {variable} = {variable}.group_by({groups!r}).agg({aggregation})")
+                grouping = (
+                    f"{variable}.{dynamic_group}"
+                    if dynamic_group
+                    else f"{variable}.group_by({groups!r})"
+                )
+                lines.append(f"    {variable} = {grouping}.agg({aggregation})")
             else:
                 lines.append(
                     f"    {variable} = {variable}.select({aggregation})"
