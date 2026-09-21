@@ -31,6 +31,7 @@ SAFE_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 ANNOTATION_KINDS = {"vline", "hline", "vspan", "hspan", "text"}
 ANNOTATION_X_INFERENCE = {"manual", "min_x", "max_x", "x_at_min_y", "x_at_max_y"}
 ANNOTATION_Y_INFERENCE = {"manual", "min_y", "max_y", "y_at_min_x", "y_at_max_x"}
+DATETIME_TICK_UNITS = {"auto", "year", "month", "week", "day", "hour", "minute", "second"}
 STD_COLORS = ["#375E97", "#FB6542", "#c1195c", "#37975e"]
 DEFAULT_STYLE = {
     "color": STD_COLORS[0],
@@ -91,6 +92,8 @@ def default_config(config_module: str | None = None) -> dict[str, Any]:
             "secondary_y_tick_step": None,
             "x_value_ticks": False,
             "x_value_tick_interval": 1,
+            "x_datetime_tick_unit": "auto",
+            "x_datetime_tick_interval": 1,
             "x_datetime_format": "",
             "x_tick_rotation": 0,
             "x_tick_horizontal_alignment": "center",
@@ -254,6 +257,8 @@ def migrate_legacy_config(raw: Any) -> tuple[dict[str, Any], list[str]]:
                 if chart_mode == "ranked" and chart.get("rank_ticks") == "interval"
                 else 1
             ),
+            "x_datetime_tick_unit": "auto",
+            "x_datetime_tick_interval": 1,
             "x_tick_rotation": x_axis.get("tick_rotation", 0),
             "x_tick_horizontal_alignment": x_axis.get("tick_alignment", "center"),
             "x_tick_vertical_alignment": x_axis.get("tick_vertical_alignment", "top"),
@@ -613,6 +618,22 @@ def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
         raise ConfigurationError("X-value tick interval must be a positive integer")
     axes["x_value_ticks"] = bool(axes.get("x_value_ticks", False))
     axes["x_value_tick_interval"] = value_tick_interval
+    datetime_tick_unit = str(axes.get("x_datetime_tick_unit", "auto")).strip().lower()
+    if datetime_tick_unit not in DATETIME_TICK_UNITS:
+        raise ConfigurationError(
+            "datetime tick unit must be auto, year, month, week, day, hour, minute, or second"
+        )
+    try:
+        datetime_tick_interval = int(axes.get("x_datetime_tick_interval", 1))
+    except (TypeError, ValueError) as error:
+        raise ConfigurationError("datetime tick interval must be a positive integer") from error
+    if (
+        isinstance(axes.get("x_datetime_tick_interval"), bool)
+        or datetime_tick_interval < 1
+    ):
+        raise ConfigurationError("datetime tick interval must be a positive integer")
+    axes["x_datetime_tick_unit"] = datetime_tick_unit
+    axes["x_datetime_tick_interval"] = datetime_tick_interval
     axes["minor_y_ticks"] = bool(axes.get("minor_y_ticks", False))
     axes["secondary_minor_y_ticks"] = bool(
         axes.get("secondary_minor_y_ticks", False)
@@ -1665,7 +1686,7 @@ def _ticks(
         else:
             ax.set_xticks(selected_values, [str(value) for value in selected_values])
     elif time_binned:
-        locator = mdates.AutoDateLocator(minticks=3, maxticks=10)
+        locator = _datetime_tick_locator(axes)
         ax.xaxis.set_major_locator(locator)
         datetime_format = axes.get("x_datetime_format", "")
         ax.xaxis.set_major_formatter(
@@ -1691,6 +1712,26 @@ def _ticks(
         horizontalalignment=axes["x_tick_horizontal_alignment"],
         verticalalignment=axes["x_tick_vertical_alignment"],
     )
+
+
+def _datetime_tick_locator(axes: dict[str, Any]):
+    unit = axes.get("x_datetime_tick_unit", "auto")
+    interval = int(axes.get("x_datetime_tick_interval", 1))
+    if unit == "year":
+        return mdates.YearLocator(base=interval)
+    if unit == "month":
+        return mdates.MonthLocator(interval=interval)
+    if unit == "week":
+        return mdates.WeekdayLocator(byweekday=mdates.MO, interval=interval)
+    if unit == "day":
+        return mdates.DayLocator(interval=interval)
+    if unit == "hour":
+        return mdates.HourLocator(interval=interval)
+    if unit == "minute":
+        return mdates.MinuteLocator(interval=interval)
+    if unit == "second":
+        return mdates.SecondLocator(interval=interval)
+    return mdates.AutoDateLocator(minticks=3, maxticks=10)
 
 
 def _y_ticks(ax, axes: dict[str, Any], secondary: bool = False) -> None:

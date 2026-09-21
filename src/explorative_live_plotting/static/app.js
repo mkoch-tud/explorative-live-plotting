@@ -845,6 +845,8 @@ function collect() {
     secondary_y_tick_step: numberValue('secondary-y-tick-step'),
     x_value_ticks: $('x-value-ticks').checked,
     x_value_tick_interval: Number($('x-value-tick-interval').value),
+    x_datetime_tick_unit: $('x-datetime-tick-unit').value,
+    x_datetime_tick_interval: Number($('x-datetime-tick-interval').value),
     x_datetime_format: $('x-datetime-format').value,
     x_tick_rotation: Number($('rotation').value), x_tick_horizontal_alignment: $('tick-ha').value,
     x_tick_vertical_alignment: $('tick-va').value, x_engineering: $('x-engineering').checked,
@@ -883,6 +885,12 @@ function updateLegendBboxState() {
 }
 function updateXValueTickState() {
   $('x-value-tick-interval').disabled = !$('x-value-ticks').checked;
+  updateDatetimeTickState();
+}
+function updateDatetimeTickState() {
+  const valuesOverride = $('x-value-ticks').checked;
+  $('x-datetime-tick-unit').disabled = valuesOverride;
+  $('x-datetime-tick-interval').disabled = valuesOverride || $('x-datetime-tick-unit').value === 'auto';
 }
 function apply(next) {
   queryRevision += 1; queryDirty = true;
@@ -934,6 +942,8 @@ function apply(next) {
   $('secondary-y-tick-step').value = axes.secondary_y_tick_step ?? '';
   $('x-value-ticks').checked = axes.x_value_ticks ?? false;
   $('x-value-tick-interval').value = axes.x_value_tick_interval ?? 1;
+  $('x-datetime-tick-unit').value = axes.x_datetime_tick_unit ?? 'auto';
+  $('x-datetime-tick-interval').value = axes.x_datetime_tick_interval ?? 1;
   $('x-datetime-format').value = axes.x_datetime_format ?? '';
   $('rotation').value = axes.x_tick_rotation ?? 0; $('tick-ha').value = axes.x_tick_horizontal_alignment ?? 'center';
   $('tick-va').value = axes.x_tick_vertical_alignment ?? 'top'; $('legend').checked = config.legend.enabled ?? true;
@@ -1027,8 +1037,8 @@ async function post(path, download = false, live = false) {
 }
 
 function bindPresentationControls() {
-  const inputIds = ['width', 'height', 'font-size', 'xlabel', 'ylabel', 'secondary-ylabel', 'xmin', 'xmax', 'ymin', 'ymax', 'secondary-ymin', 'secondary-ymax', 'xticks', 'xtick-labels', 'yticks', 'ytick-labels', 'y-tick-min', 'y-tick-max', 'y-tick-step', 'secondary-yticks', 'secondary-ytick-labels', 'secondary-y-tick-min', 'secondary-y-tick-max', 'secondary-y-tick-step', 'x-value-tick-interval', 'x-datetime-format', 'rotation', 'grid-opacity', 'label-font-size', 'tick-font-size', 'legend-font-size', 'legend-ncols', 'legend-bbox-x', 'legend-bbox-y', 'legend-handlelength', 'legend-columnspacing', 'legend-handletextpad', 'legend-opacity', 'broken-y-gap'];
-  const changeIds = ['xscale', 'yscale', 'secondary-yscale', 'tick-ha', 'tick-va', 'major-x', 'minor-x', 'minor-y', 'secondary-minor-y', 'x-engineering', 'y-engineering', 'secondary-y-engineering', 'x-grid', 'y-grid', 'secondary-grid', 'legend', 'legend-loc', 'mono'];
+  const inputIds = ['width', 'height', 'font-size', 'xlabel', 'ylabel', 'secondary-ylabel', 'xmin', 'xmax', 'ymin', 'ymax', 'secondary-ymin', 'secondary-ymax', 'xticks', 'xtick-labels', 'yticks', 'ytick-labels', 'y-tick-min', 'y-tick-max', 'y-tick-step', 'secondary-yticks', 'secondary-ytick-labels', 'secondary-y-tick-min', 'secondary-y-tick-max', 'secondary-y-tick-step', 'x-value-tick-interval', 'x-datetime-tick-interval', 'x-datetime-format', 'rotation', 'grid-opacity', 'label-font-size', 'tick-font-size', 'legend-font-size', 'legend-ncols', 'legend-bbox-x', 'legend-bbox-y', 'legend-handlelength', 'legend-columnspacing', 'legend-handletextpad', 'legend-opacity', 'broken-y-gap'];
+  const changeIds = ['xscale', 'yscale', 'secondary-yscale', 'x-datetime-tick-unit', 'tick-ha', 'tick-va', 'major-x', 'minor-x', 'minor-y', 'secondary-minor-y', 'x-engineering', 'y-engineering', 'secondary-y-engineering', 'x-grid', 'y-grid', 'secondary-grid', 'legend', 'legend-loc', 'mono'];
   for (const id of inputIds) $(id).oninput = () => changed(false);
   for (const id of changeIds) $(id).onchange = () => changed(false);
   for (const id of ['label-font-override', 'tick-font-override', 'legend-font-override']) {
@@ -1036,6 +1046,7 @@ function bindPresentationControls() {
   }
   $('legend-bbox-enabled').onchange = () => { updateLegendBboxState(); changed(false); };
   $('x-value-ticks').onchange = () => { updateXValueTickState(); changed(false); };
+  $('x-datetime-tick-unit').onchange = () => { updateDatetimeTickState(); changed(false); };
   $('broken-y-enabled').onchange = event => {
     config.broken_y_axis.enabled = event.target.checked;
     if (event.target.checked && config.broken_y_axis.ranges.length < 2) {

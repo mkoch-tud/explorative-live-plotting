@@ -183,6 +183,11 @@ to hours, minutes, seconds, and fractions as appropriate for the visible span.
 Set **Datetime tick format** to override those automatic labels with a Python
 `strftime` pattern. For example, `%b %d` produces `Apr 01`, `%b %d, %Y`
 produces `Apr 01, 2026`, and `%Y-%m-%d %H:%M` includes date, hour, and minute.
+Set **Datetime major tick unit** to `month` and **Calendar interval** to `2` or
+`3` to label every second or third month. The available fixed calendar units
+are year, month, week, day, hour, minute, and second; `auto` retains adaptive
+tick placement. In JSON these settings are `x_datetime_tick_unit` and
+`x_datetime_tick_interval` within `axes`.
 Common fields are `%Y` (year), `%y` (short year), `%b`/`%B` (abbreviated/full
 month), `%m` (numeric month), `%d` (day), and `%H:%M:%S` (time). The browser
 shows this reference next to the setting.
@@ -325,7 +330,8 @@ Axis controls include labels, limits, linear/log/symlog/logit scales, grids,
 custom X/Y ticks and labels, major/minor ticks, rotation, alignment, and a
 plot-wide default or monospace font. Independent engineering-notation toggles
 are available for X, Y, and secondary Y. Custom X tick labels take precedence
-over automatic date or engineering formatting. A global font size applies by
+over fixed or automatic date formatting, and **Use actual X-column values as
+tick labels** takes precedence over the calendar locator. A global font size applies by
 default; new plots start at 5.6 × 2.8 inches with a 12-point global font.
 Checkboxes enable separate axis-label, legend, and tick sizes.
 Engineering labels use compact notation without whitespace, such as `1k` or

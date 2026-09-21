@@ -607,7 +607,7 @@ def _ticks(ax, axes, time_binned=False, x_values=None):
         else:
             ax.set_xticks(selected_values, [str(value) for value in selected_values])
     elif time_binned:
-        locator = mdates.AutoDateLocator(minticks=3, maxticks=10)
+        locator = _datetime_tick_locator(axes)
         ax.xaxis.set_major_locator(locator)
         datetime_format = axes.get("x_datetime_format", "")
         ax.xaxis.set_major_formatter(
@@ -633,6 +633,26 @@ def _ticks(ax, axes, time_binned=False, x_values=None):
         horizontalalignment=axes["x_tick_horizontal_alignment"],
         verticalalignment=axes["x_tick_vertical_alignment"],
     )
+
+
+def _datetime_tick_locator(axes):
+    unit = axes.get("x_datetime_tick_unit", "auto")
+    interval = int(axes.get("x_datetime_tick_interval", 1))
+    if unit == "year":
+        return mdates.YearLocator(base=interval)
+    if unit == "month":
+        return mdates.MonthLocator(interval=interval)
+    if unit == "week":
+        return mdates.WeekdayLocator(byweekday=mdates.MO, interval=interval)
+    if unit == "day":
+        return mdates.DayLocator(interval=interval)
+    if unit == "hour":
+        return mdates.HourLocator(interval=interval)
+    if unit == "minute":
+        return mdates.MinuteLocator(interval=interval)
+    if unit == "second":
+        return mdates.SecondLocator(interval=interval)
+    return mdates.AutoDateLocator(minticks=3, maxticks=10)
 
 
 def _y_ticks(ax, axes, secondary=False):
