@@ -161,11 +161,15 @@ def _source_spec(raw: Any) -> SourceSpec:
         if separator == r"\t":
             separator = "\t"
         options["separator"] = separator
+    filter_expression = raw.get("filter_expression")
+    if filter_expression is not None and not isinstance(filter_expression, str):
+        raise ConfigurationError("source filter expression must be a string or null")
     return SourceSpec(
         name=str(raw.get("name", "")).strip(),
         path=str(raw.get("path", "")).strip(),
         format=str(raw.get("format", "auto")),
         options=options,
+        filter_expression=str(filter_expression or "").strip() or None,
     )
 
 
@@ -195,6 +199,7 @@ def create_app(state: ApplicationState) -> Flask:
                 "sources": state.catalog.all_metadata(),
                 "registry": state.registry.metadata(),
                 "config_module": state.catalog.config_module,
+                "expression_variables": state.catalog.expression_variables(),
                 "default_config": default_config(state.catalog.config_module),
                 "output_dir": str(state.output_dir),
             }
@@ -233,7 +238,13 @@ def create_app(state: ApplicationState) -> Flask:
             else:
                 sources = state.catalog.set_config_module(module)
         log(f"Config module set to: {module or '(none)'}")
-        return jsonify({"config_module": module, "sources": sources})
+        return jsonify(
+            {
+                "config_module": module,
+                "sources": sources,
+                "expression_variables": state.catalog.expression_variables(),
+            }
+        )
 
     @app.post("/api/sources")
     def add_source():

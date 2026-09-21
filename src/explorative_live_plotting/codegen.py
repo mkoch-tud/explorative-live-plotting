@@ -12,6 +12,7 @@ import polars as pl
 
 from .data import MODULE_NAME, PATH_VARIABLE, DataCatalog, normalize_reader_options
 from .errors import ConfigurationError
+from .expressions import expression_names
 from .query import validate_layer
 from .registry import BUILTIN_AGGREGATIONS, BUILTIN_PLOTS, Registry
 
@@ -129,6 +130,8 @@ def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema:
     if layer["limit"] is not None:
         lines.append(f"    {variable} = {variable}.limit({layer['limit']!r})")
     required_filters = [_filter_code(item, schema) for item in layer["required_filters"]]
+    if layer["base_filter_expression"]:
+        required_filters.append(layer["base_filter_expression"])
     if required_filters:
         lines.append(
             f"    {variable} = {variable}.filter(pl.all_horizontal(["
@@ -137,6 +140,8 @@ def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema:
     if layer["aggregation"] == "relative_count":
         lines.append(f"    {all_variable} = {variable}")
     filters = [_filter_code(item, schema) for item in layer["filters"]]
+    if layer["filter_expression"]:
+        filters.append(layer["filter_expression"])
     if filters:
         combiner = "all_horizontal" if layer["filter_logic"] == "and" else "any_horizontal"
         lines.append(
@@ -717,15 +722,32 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
             raise ConfigurationError(f"configuration is missing source definition: {name}")
 
     module_name = config.get("config_module")
-    variables = sorted(
-        {
-            variable
-            for name in used_sources
-            for variable in PATH_VARIABLE.findall(str(source_specs[name]["path"]))
-        }
+    path_variables = {
+        variable
+        for name in used_sources
+        for variable in PATH_VARIABLE.findall(str(source_specs[name]["path"]))
+    }
+    expression_values = [
+        str(source_specs[name].get("filter_expression") or "").strip()
+        for name in used_sources
+    ]
+    expression_values.extend(
+        expression
+        for layer in enabled_layers
+        for expression in (
+            layer["base_filter_expression"],
+            layer["filter_expression"],
+        )
+        if expression
     )
+    expression_variables = set().union(
+        *(expression_names(expression) for expression in expression_values if expression)
+    )
+    variables = sorted(path_variables | expression_variables)
     if variables and not module_name:
-        raise ConfigurationError("portable source paths require a config module")
+        raise ConfigurationError(
+            "portable source paths or configured expressions require a config module"
+        )
     if module_name and MODULE_NAME.fullmatch(module_name) is None:
         raise ConfigurationError(f"invalid config module name: {module_name}")
 
@@ -779,6 +801,11 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
         source_lines.append(
             f"    {lazy_variable} = pl.{scanner}({path_variable}, **{options})"
         )
+        source_filter = str(item.get("filter_expression") or "").strip()
+        if source_filter:
+            source_lines.append(
+                f"    {lazy_variable} = {lazy_variable}.filter({source_filter})"
+            )
 
     draw_functions = [_draw_code(index, layer) for index, layer in enumerate(enabled_layers)]
     query_blocks = []

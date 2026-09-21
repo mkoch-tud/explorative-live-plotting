@@ -8,6 +8,7 @@
 </head>
 <body>
   <datalist id="time-bins"><option value="1s"><option value="1m"><option value="5m"><option value="15m"><option value="1h"><option value="1d"><option value="1w"><option value="1mo"><option value="1y"></datalist>
+  <datalist id="expression-symbols"></datalist>
   <header><h1>Explorative Live Plotting</h1><div class="header-options"><label class="live"><input id="live-update" type="checkbox" checked> Live style updates</label><label class="live"><input id="show-system-stats" type="checkbox"> Show RAM/CPU</label></div></header>
   <main id="workspace">
     <aside id="config-panel">
@@ -16,7 +17,7 @@
         <label>Path or glob<div class="path-completer"><input id="source-path" role="combobox" aria-autocomplete="list" aria-controls="source-path-suggestions" aria-expanded="false" autocomplete="off" placeholder="${DATA_PATH}/measurements/*.parquet"><div id="source-path-suggestions" class="path-suggestions" role="listbox" hidden></div></div></label>
         <small id="source-path-resolved" class="path-resolution"></small>
         <label>Format<select id="source-format"><option>auto</option><option>csv</option><option>parquet</option><option>ndjson</option><option>ipc</option></select></label>
-        <details class="config-subsection"><summary>Advanced source options</summary><div class="config-subsection-body"><label>Config module<input id="config-module" placeholder="ipv6_ndpi.config"></label><button id="apply-config-module">Apply config module</button><label>CSV separator<input id="source-separator" maxlength="2" placeholder=", or ; or \t"></label><label>Reader options (JSON)<textarea id="source-options">{}</textarea><small>Schema example: <code>{"schema_overrides":{"timestamp":"Datetime"}}</code></small></label></div></details>
+        <details class="config-subsection"><summary>Advanced source options</summary><div class="config-subsection-body"><label>Config module<input id="config-module" placeholder="ipv6_ndpi.config"></label><button id="apply-config-module">Apply config module</button><label>Global Polars filter<input id="source-filter-expression" list="expression-symbols" placeholder="const.IS_SYN or pl.col('value') > 0"><small>Applied lazily to previews and every layer using this source.</small></label><label>CSV separator<input id="source-separator" maxlength="2" placeholder=", or ; or \t"></label><label>Reader options (JSON)<textarea id="source-options">{}</textarea><small>Schema example: <code>{"schema_overrides":{"timestamp":"Datetime"}}</code></small></label></div></details>
         <button id="add-source">Add source</button><div id="sources"></div>
       </div></details>
       <details class="config-section" open><summary><span>Plot layers</span><span id="layer-count" class="section-meta">0 configured</span></summary><div class="config-section-body"><div id="layers"></div><button id="add-layer">Add layer</button></div></details>

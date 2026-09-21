@@ -80,6 +80,34 @@ The source form remains available after each registration, so there is no fixed
 limit on the number of independent data sources in a plot. Each plot layer can
 select any registered source.
 
+### Polars filter expressions
+
+The advanced source options accept a **Global Polars filter**. It is applied
+lazily to previews and every layer using that source. Expressions may be written
+inline:
+
+```python
+pl.col("tcp.flags.text").str.contains("SYN") & ~pl.col("tcp.flags.text").str.contains("ACK")
+```
+
+They may also reference a public `pl.Expr` exported by the configured module or
+by a module it exposes. For example, after configuring a module that imports
+`constants as const`, enter `const.IS_SYN`. Available expression variables are
+suggested by the browser. Only Polars functions and methods can be called; the
+field does not execute unrestricted Python code.
+
+Each layer has two corresponding fields under **Filters, limits & styling**:
+
+- **Layer base Polars expression** is treated as a required condition when set
+  and runs before the denominator of `relative_count` is calculated.
+- **Layer Polars expression** is combined with the structured filter conditions
+  using the selected root AND/OR rule, so it affects the plotted rows and the
+  numerator of `relative_count`.
+
+For a weekly percentage of irregular SYN packets, use `const.IS_SYN` globally
+or as the layer base expression, then use `pl.col("is_irregular_syn")` as the
+layer expression and select `relative_count` with `{"scale":"percent"}`.
+
 ## Portable paths and repository integration
 
 When this workbench is installed into or alongside another Python repository,

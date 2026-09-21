@@ -19,6 +19,7 @@ from typing import Any
 import polars as pl
 
 from .errors import ConfigurationError
+from .expressions import parse_filter_expression
 
 FORMATS = {"auto", "csv", "parquet", "ndjson", "ipc"}
 MODULE_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
@@ -140,6 +141,7 @@ class SourceSpec:
     path: str
     format: str = "auto"
     options: dict[str, Any] | None = None
+    filter_expression: str | None = None
 
 
 class DataCatalog:
@@ -250,14 +252,22 @@ class DataCatalog:
             if data_format != "csv":
                 raise ConfigurationError("separator can only be used with CSV sources")
         if data_format == "csv":
-            return pl.scan_csv(path, **options)
-        if data_format == "parquet":
-            return pl.scan_parquet(path, **options)
-        if data_format == "ndjson":
-            return pl.scan_ndjson(path, **options)
-        if data_format == "ipc":
-            return pl.scan_ipc(path, **options)
-        raise AssertionError(data_format)
+            lazy = pl.scan_csv(path, **options)
+        elif data_format == "parquet":
+            lazy = pl.scan_parquet(path, **options)
+        elif data_format == "ndjson":
+            lazy = pl.scan_ndjson(path, **options)
+        elif data_format == "ipc":
+            lazy = pl.scan_ipc(path, **options)
+        else:
+            raise AssertionError(data_format)
+        expression = str(spec.filter_expression or "").strip()
+        if expression:
+            schema = lazy.collect_schema()
+            lazy = lazy.filter(
+                parse_filter_expression(expression, schema, module, module_name)
+            )
+        return lazy
 
     def metadata(self, name: str) -> dict[str, Any]:
         spec = self.get(name)
@@ -439,6 +449,33 @@ class DataCatalog:
             if not name.startswith("_") and isinstance(value, (str, os.PathLike))
         ]
 
+    def expression_variables(self) -> list[str]:
+        """Return public Polars expressions exported by the active module or its modules."""
+        with self._lock:
+            module = self._config_module
+        if module is None:
+            return []
+        expressions = []
+        for name, value in sorted(vars(module).items()):
+            if name.startswith("_"):
+                continue
+            if isinstance(value, pl.Expr):
+                expressions.append(name)
+            elif isinstance(value, ModuleType):
+                expressions.extend(
+                    f"{name}.{child_name}"
+                    for child_name, child in sorted(vars(value).items())
+                    if not child_name.startswith("_") and isinstance(child, pl.Expr)
+                )
+        return expressions
+
+    def filter_expression(self, expression: str, schema: pl.Schema) -> pl.Expr:
+        """Resolve an inline expression against the current config module."""
+        with self._lock:
+            module = self._config_module
+            module_name = self._config_module_name
+        return parse_filter_expression(expression, schema, module, module_name)
+
     def complete_path(self, value: str, limit: int = 50) -> dict[str, Any]:
         """Resolve a path template and suggest matching variables and filesystem entries."""
         raw = str(value)
@@ -585,6 +622,8 @@ class DataCatalog:
             raise ConfigurationError("source name must contain letters, numbers, _ or -")
         if spec.format not in FORMATS:
             raise ConfigurationError(f"unsupported source format: {spec.format}")
+        if spec.filter_expression is not None and not isinstance(spec.filter_expression, str):
+            raise ConfigurationError("source filter expression must be a string or null")
 
     def _format(self, spec: SourceSpec, resolved_path: str | None = None) -> str:
         if spec.format != "auto":

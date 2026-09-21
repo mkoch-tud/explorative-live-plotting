@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let bootstrap = {sources: [], registry: {aggregations: [], plot_types: []}};
+let bootstrap = {sources: [], registry: {aggregations: [], plot_types: []}, expression_variables: []};
 let config = null;
 let liveTimer = null;
 let renderSequence = 0;
@@ -207,6 +207,11 @@ function ensureConfig() {
   });
 }
 
+function renderExpressionSymbols() {
+  $('expression-symbols').innerHTML = (bootstrap.expression_variables ?? [])
+    .map(value => `<option value="${escapeHtml(value)}"></option>`).join('');
+}
+
 function newLayer() {
   const index = config.layers.length;
   return {
@@ -214,6 +219,7 @@ function newLayer() {
     source: bootstrap.sources[0]?.name ?? '', plot_type: 'line', x_column: '',
     y_column: '', group_column: '', aggregation: 'none', aggregation_options: {},
     time_bin: null, filter_logic: 'and', required_filters: [], filters: [],
+    base_filter_expression: '', filter_expression: '',
     sort: 'x_ascending', limit: null, result_limit: null,
     result_y_min: null, result_y_max: null,
     stacked: false, secondary_y: false, fix_x_values: false,
@@ -264,7 +270,9 @@ function renderSources() {
     div.className = 'source';
     const resolved = item.resolved_path && item.resolved_path !== item.path
       ? `<small>Resolved</small><code>${escapeHtml(item.resolved_path)}</code>` : '';
-    div.innerHTML = `<div class="source-head"><strong>${escapeHtml(item.name)}</strong><button class="remove">Remove</button></div><small>${escapeHtml(item.format)} · ${item.columns.length} columns</small><code>${escapeHtml(item.path)}</code>${resolved}`;
+    const sourceFilter = item.filter_expression
+      ? `<small>Global filter</small><code>${escapeHtml(item.filter_expression)}</code>` : '';
+    div.innerHTML = `<div class="source-head"><strong>${escapeHtml(item.name)}</strong><button class="remove">Remove</button></div><small>${escapeHtml(item.format)} · ${item.columns.length} columns</small><code>${escapeHtml(item.path)}</code>${resolved}${sourceFilter}`;
     div.querySelector('button').onclick = async () => {
       const response = await fetch(`/api/sources/${encodeURIComponent(item.name)}`, {method: 'DELETE'});
       if (!response.ok) return apiError(response);
@@ -422,7 +430,9 @@ function renderLayers() {
   root.innerHTML = '';
   $('layer-count').textContent = `${config.layers.length} configured`;
   config.layers.forEach((layer, index) => {
-    layer.style ??= {}; layer.filters ??= []; layer.aggregation_options ??= {}; layer.options ??= {};
+    layer.style ??= {}; layer.filters ??= []; layer.required_filters ??= [];
+    layer.base_filter_expression ??= ''; layer.filter_expression ??= '';
+    layer.aggregation_options ??= {}; layer.options ??= {};
     layer.style.color ??= STD_COLORS[index % STD_COLORS.length];
     const card = document.createElement('div');
     card.className = 'layer';
@@ -440,7 +450,7 @@ function renderLayers() {
     const groupingText = grouping === 'group_by_dynamic' ? 'group_by_dynamic bins the Time/X column by Every; the function aggregates Y values in each time bin.' : grouping === 'group_by' ? 'group_by uses each distinct X value as a group; the function aggregates Y values within that group.' : 'None plots row-level X and Y values without aggregation.';
     const aggregations = bootstrap.registry.aggregations.filter(value => value !== 'none');
     const groupingOptions = `<option value="none" ${grouping === 'none' ? 'selected' : ''}>none (raw rows)</option><option value="group_by" ${grouping === 'group_by' ? 'selected' : ''}>group_by</option><option value="group_by_dynamic" ${grouping === 'group_by_dynamic' ? 'selected' : ''}>group_by_dynamic</option>`;
-    card.innerHTML = `<div class="layer-head"><input class="enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}><input class="label" value="${escapeHtml(layer.label)}"><button class="remove">×</button></div><div class="grid plot-basics"><label>Source<select class="source-select">${option(names, layer.source)}</select></label><label>Plot type<select class="plot-type">${option(bootstrap.registry.plot_types, layer.plot_type)}</select></label><label>Color${colorPalette(selectedColor)}</label></div><div class="grid axis-columns"><label><span>${xLabel} ${info('X supplies the horizontal values. With group_by it is the grouping key; with group_by_dynamic it must be a Date or Datetime column.')}</span><select class="x-column">${option(cols, layer.x_column, true)}</select></label><label><span>Y/value column ${info('The selected aggregation function is applied to this column. count and relative_count count rows and therefore ignore Y.')}</span><select class="y-column">${option(cols, layer.y_column, true)}</select></label></div><div class="grouping-panel"><div class="grid grouping-grid"><label><span>Grouping method ${info('none plots raw rows; group_by combines equal X values; group_by_dynamic creates regular time bins from the Time/X column.')}</span><select class="grouping-method">${groupingOptions}</select></label><label class="time-every" ${grouping === 'group_by_dynamic' ? '' : 'hidden'}><span>Every ${info('Width of each time bin, for example 1s, 1m, 5m, 1h, 1d, 1w, or 1mo.')}</span><input class="time-bin" list="time-bins" placeholder="1m" value="${escapeHtml(layer.time_bin ?? '1m')}"></label><label><span>Aggregate Y with ${info('The function is applied to Y inside every X group or time bin. count and relative_count operate on rows instead.')}</span><select class="aggregation" ${grouping === 'none' ? 'disabled' : ''}>${option(aggregations, layer.aggregation === 'none' ? 'sum' : layer.aggregation)}</select></label></div><small>${groupingText}</small></div><div class="grid"><label><span>Split series by / color ${info('Optional categorical column. Each distinct value becomes a separate plotted series and legend entry; when aggregating, it is an additional grouping key.')}</span><select class="group-column">${option(cols, layer.group_column, true)}</select></label><label>Sort<select class="sort">${option(['none', 'x_ascending', 'x_descending', 'y_ascending', 'y_descending'], layer.sort)}</select></label><label>Input row limit<input class="limit" type="number" min="1" value="${layer.limit ?? ''}"></label><label><span>Result limit ${info('Applied after filtering, aggregation, and sorting. Use this for ranked top-N plots; Input row limit instead bounds raw data loading.')}</span><input class="result-limit" type="number" min="1" value="${layer.result_limit ?? ''}"></label><label>Result Y min<input class="result-y-min" type="number" step="any" value="${layer.result_y_min ?? ''}"></label><label>Result Y max<input class="result-y-max" type="number" step="any" value="${layer.result_y_max ?? ''}"></label><label>Opacity<input class="alpha" type="number" min="0" max="1" step="0.05" value="${layer.style.alpha ?? 1}"></label><label>Marker<select class="marker">${option(['none', 'o', 's', '^', 'v', 'D', 'x', '+', '*'], layer.style.marker ?? 'none')}</select></label><label>Line width<input class="linewidth" type="number" step=".1" value="${layer.style.linewidth ?? 1.5}"></label></div><div class="checks"><label><input class="stacked" type="checkbox" ${layer.stacked ? 'checked' : ''}> Stacked</label><label><input class="secondary" type="checkbox" ${layer.secondary_y ? 'checked' : ''}> Secondary y</label><label><input class="fix-x-values" type="checkbox" ${layer.fix_x_values ? 'checked' : ''}> Fix shared X values from this layer ${info('This layer defines the ordered X domain after its filters, aggregation, sorting, and result limit. Every other layer is filtered and aligned to that domain.')}</label></div><label><span>Aggregation options (JSON) ${info('quantile, relative_count, and relative_value accept built-in options. See the examples below and the README for the complete list.')}</span><textarea class="aggregation-options">${escapeHtml(JSON.stringify(layer.aggregation_options))}</textarea></label><small>Examples: {"quantile":0.95}; {"scale":"percent"} for relative_count; or {"denominator":"total","scale":"percent"} for relative_value.</small><label><span>Plot options (JSON) ${info('Renderer-specific settings. Styling such as color, opacity, marker, and line width uses the controls above.')}</span><textarea class="plot-options">${escapeHtml(JSON.stringify(layer.options))}</textarea></label><small>Examples: histogram {"bins":50,"density":true}; step {"where":"pre"}; hexbin {"gridsize":40}.</small><div class="filter-editor"><div class="filter-editor-head"><strong>Filters</strong>${info('The root combines its conditions and nested groups. Every nested group can independently use AND or OR.') }<label>Root match<select class="filter-logic">${option(['and', 'or'], layer.filter_logic)}</select></label><button class="add-filter" type="button">+ condition</button><button class="add-filter-group" type="button">+ nested group</button></div><div class="filters"></div></div>`;
+    card.innerHTML = `<div class="layer-head"><input class="enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}><input class="label" value="${escapeHtml(layer.label)}"><button class="remove">×</button></div><div class="grid plot-basics"><label>Source<select class="source-select">${option(names, layer.source)}</select></label><label>Plot type<select class="plot-type">${option(bootstrap.registry.plot_types, layer.plot_type)}</select></label><label>Color${colorPalette(selectedColor)}</label></div><div class="grid axis-columns"><label><span>${xLabel} ${info('X supplies the horizontal values. With group_by it is the grouping key; with group_by_dynamic it must be a Date or Datetime column.')}</span><select class="x-column">${option(cols, layer.x_column, true)}</select></label><label><span>Y/value column ${info('The selected aggregation function is applied to this column. count and relative_count count rows and therefore ignore Y.')}</span><select class="y-column">${option(cols, layer.y_column, true)}</select></label></div><div class="grouping-panel"><div class="grid grouping-grid"><label><span>Grouping method ${info('none plots raw rows; group_by combines equal X values; group_by_dynamic creates regular time bins from the Time/X column.')}</span><select class="grouping-method">${groupingOptions}</select></label><label class="time-every" ${grouping === 'group_by_dynamic' ? '' : 'hidden'}><span>Every ${info('Width of each time bin, for example 1s, 1m, 5m, 1h, 1d, 1w, or 1mo.')}</span><input class="time-bin" list="time-bins" placeholder="1m" value="${escapeHtml(layer.time_bin ?? '1m')}"></label><label><span>Aggregate Y with ${info('The function is applied to Y inside every X group or time bin. count and relative_count operate on rows instead.')}</span><select class="aggregation" ${grouping === 'none' ? 'disabled' : ''}>${option(aggregations, layer.aggregation === 'none' ? 'sum' : layer.aggregation)}</select></label></div><small>${groupingText}</small></div><div class="grid"><label><span>Split series by / color ${info('Optional categorical column. Each distinct value becomes a separate plotted series and legend entry; when aggregating, it is an additional grouping key.')}</span><select class="group-column">${option(cols, layer.group_column, true)}</select></label><label>Sort<select class="sort">${option(['none', 'x_ascending', 'x_descending', 'y_ascending', 'y_descending'], layer.sort)}</select></label><label>Input row limit<input class="limit" type="number" min="1" value="${layer.limit ?? ''}"></label><label><span>Result limit ${info('Applied after filtering, aggregation, and sorting. Use this for ranked top-N plots; Input row limit instead bounds raw data loading.')}</span><input class="result-limit" type="number" min="1" value="${layer.result_limit ?? ''}"></label><label>Result Y min<input class="result-y-min" type="number" step="any" value="${layer.result_y_min ?? ''}"></label><label>Result Y max<input class="result-y-max" type="number" step="any" value="${layer.result_y_max ?? ''}"></label><label>Opacity<input class="alpha" type="number" min="0" max="1" step="0.05" value="${layer.style.alpha ?? 1}"></label><label>Marker<select class="marker">${option(['none', 'o', 's', '^', 'v', 'D', 'x', '+', '*'], layer.style.marker ?? 'none')}</select></label><label>Line width<input class="linewidth" type="number" step=".1" value="${layer.style.linewidth ?? 1.5}"></label></div><div class="checks"><label><input class="stacked" type="checkbox" ${layer.stacked ? 'checked' : ''}> Stacked</label><label><input class="secondary" type="checkbox" ${layer.secondary_y ? 'checked' : ''}> Secondary y</label><label><input class="fix-x-values" type="checkbox" ${layer.fix_x_values ? 'checked' : ''}> Fix shared X values from this layer ${info('This layer defines the ordered X domain after its filters, aggregation, sorting, and result limit. Every other layer is filtered and aligned to that domain.')}</label></div><label><span>Aggregation options (JSON) ${info('quantile, relative_count, and relative_value accept built-in options. See the examples below and the README for the complete list.')}</span><textarea class="aggregation-options">${escapeHtml(JSON.stringify(layer.aggregation_options))}</textarea></label><small>Examples: {"quantile":0.95}; {"scale":"percent"} for relative_count; or {"denominator":"total","scale":"percent"} for relative_value.</small><label><span>Plot options (JSON) ${info('Renderer-specific settings. Styling such as color, opacity, marker, and line width uses the controls above.')}</span><textarea class="plot-options">${escapeHtml(JSON.stringify(layer.options))}</textarea></label><small>Examples: histogram {"bins":50,"density":true}; step {"where":"pre"}; hexbin {"gridsize":40}.</small><div class="filter-editor"><div class="filter-editor-head"><strong>Filters</strong>${info('Structured filters and the layer expression use Root match. When set, the base expression is required and is applied before a relative_count denominator is calculated.') }<label>Root match<select class="filter-logic">${option(['and', 'or'], layer.filter_logic)}</select></label><button class="add-filter" type="button">+ condition</button><button class="add-filter-group" type="button">+ nested group</button></div><label>Layer base Polars expression<input class="base-filter-expression" list="expression-symbols" value="${escapeHtml(layer.base_filter_expression)}" placeholder="const.IS_SYN"><small>Defines base rows for this layer and is included in the relative_count denominator.</small></label><label>Layer Polars expression<input class="filter-expression" list="expression-symbols" value="${escapeHtml(layer.filter_expression)}" placeholder="pl.col('is_irregular_syn')"><small>Combined with the structured filters using Root match; affects the numerator/plotted rows.</small></label><div class="filters"></div></div>`;
     const groupLabel = card.querySelector('.group-column').closest('label');
     card.querySelector('.grouping-grid').appendChild(groupLabel);
     const groupingPanel = card.querySelector('.grouping-panel');
@@ -450,6 +460,7 @@ function renderLayers() {
     const advancedStatus = [];
     const filterCount = filterConditions(layer.filters).length;
     if (filterCount) advancedStatus.push(`${filterCount} filter${filterCount === 1 ? '' : 's'}`);
+    if (layer.base_filter_expression || layer.filter_expression) advancedStatus.push('Polars expression');
     if (layer.limit || layer.result_limit) advancedStatus.push('limited');
     if (layer.secondary_y) advancedStatus.push('secondary Y');
     if (layer.stacked) advancedStatus.push('stacked');
@@ -477,6 +488,7 @@ function renderLayers() {
     q('.source-select').onchange = event => {
       layer.source = event.target.value; layer.x_column = ''; layer.y_column = '';
       layer.group_column = ''; layer.time_bin = null; layer.required_filters = []; layer.filters = [];
+      layer.base_filter_expression = ''; layer.filter_expression = '';
       renderLayers(); changed(true);
     };
     for (const [selector, key, presentation] of [
@@ -530,6 +542,8 @@ function renderLayers() {
       try { layer.options = JSON.parse(event.target.value); changed(false); }
       catch { message('Invalid plot options JSON', true); }
     };
+    q('.base-filter-expression').oninput = event => { layer.base_filter_expression = event.target.value; changed(true); };
+    q('.filter-expression').oninput = event => { layer.filter_expression = event.target.value; changed(true); };
     const filters = q('.filters');
     layer.filters.forEach((item, filterIndex) => filters.appendChild(filterRow(layer, item, layer.filters, filterIndex)));
     q('.add-filter').onclick = () => {
@@ -672,7 +686,7 @@ function renderStages() {
 function collect() {
   const result = structuredClone(config);
   result.config_module = $('config-module').value.trim() || null;
-  result.sources = bootstrap.sources.map(({name, path, format, options}) => ({name, path, format, options}));
+  result.sources = bootstrap.sources.map(({name, path, format, options, filter_expression}) => ({name, path, format, options, filter_expression: filter_expression ?? null}));
   result.filename = $('filename').value;
   result.figure = {width: Number($('width').value), height: Number($('height').value), dpi: 150, font_family: $('mono').checked ? 'monospace' : 'default', font_size: Number($('font-size').value)};
   result.axes = {
@@ -811,7 +825,8 @@ async function applyConfigModule(showMessage = true) {
   const response = await fetch('/api/config-module', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module: requested})});
   if (!response.ok) { await apiError(response); return false; }
   const result = await response.json(); bootstrap.config_module = result.config_module;
-  bootstrap.sources = result.sources; config.config_module = result.config_module;
+  bootstrap.sources = result.sources; bootstrap.expression_variables = result.expression_variables ?? [];
+  config.config_module = result.config_module; renderExpressionSymbols();
   queryRevision += 1; queryDirty = true; clearTimeout(liveTimer);
   renderSources(); renderLayers(); schedulePathSuggestions();
   if (showMessage) message(`Config module applied: ${result.config_module ?? '(none)'}.`);
@@ -890,13 +905,13 @@ $('source-path').onblur = () => setTimeout(() => renderPathSuggestions([]), 120)
 $('show-system-stats').onchange = event => setSystemStatsEnabled(event.target.checked);
 $('add-source').onclick = async () => {
   if (!await applyConfigModule(false)) return;
-  const submitted = {name: $('source-name').value, path: $('source-path').value, format: $('source-format').value, separator: $('source-separator').value, optionsText: $('source-options').value};
+  const submitted = {name: $('source-name').value, path: $('source-path').value, format: $('source-format').value, separator: $('source-separator').value, filterExpression: $('source-filter-expression').value, optionsText: $('source-options').value};
   let options; try { options = JSON.parse(submitted.optionsText || '{}'); } catch { return message('Invalid source options JSON', true); }
   message(`Inferring ${submitted.name || 'source'} schema from the first 100 rows in the background…`);
-  const response = await fetch('/api/sources', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: submitted.name, path: submitted.path, format: submitted.format, separator: submitted.separator, options})});
+  const response = await fetch('/api/sources', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: submitted.name, path: submitted.path, format: submitted.format, separator: submitted.separator, filter_expression: submitted.filterExpression, options})});
   if (!response.ok) return apiError(response);
   const added = await response.json(); bootstrap.sources = bootstrap.sources.filter(item => item.name !== added.name); bootstrap.sources.push(added);
-  $('source-name').value = ''; $('source-path').value = ''; $('source-format').value = 'auto'; $('source-separator').value = ''; $('source-options').value = '{}';
+  $('source-name').value = ''; $('source-path').value = ''; $('source-format').value = 'auto'; $('source-separator').value = ''; $('source-filter-expression').value = ''; $('source-options').value = '{}';
   renderPathSuggestions([]); $('source-path-resolved').textContent = '';
   renderSources(); renderLayers(); message('Lazy source registered.');
 };
@@ -940,6 +955,7 @@ $('load-config').onchange = async event => {
   }
   if (!response.ok) return apiError(response);
   const result = await response.json(); bootstrap.config_module = result.config_module; bootstrap.sources = [];
+  bootstrap.expression_variables = result.expression_variables ?? []; renderExpressionSymbols();
   const loadedSources = [];
   for (const sourceSpec of loaded.sources) {
     const sourceResponse = await fetch('/api/sources', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(sourceSpec)});
@@ -989,6 +1005,6 @@ bindPresentationControls();
 setupPanelResizer();
 (async () => {
   const response = await fetch('/api/bootstrap'); bootstrap = await response.json();
-  config = bootstrap.default_config; renderSources(); apply(config);
+  config = bootstrap.default_config; renderExpressionSymbols(); renderSources(); apply(config);
   message('Ready. Query changes render on demand; style changes update live from cache.');
 })().catch(error => message(error.message, true));

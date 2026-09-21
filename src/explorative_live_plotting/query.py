@@ -31,7 +31,7 @@ OPERATORS = {
 }
 TIME_BIN = re.compile(r"[1-9]\d*(?:ns|us|ms|s|m|h|d|w|mo|q|y)")
 MAX_PLOT_ROWS = 1_000_000
-CACHE_SCHEMA_VERSION = 7
+CACHE_SCHEMA_VERSION = 8
 QUERY_FIELDS = (
     "source",
     "x_column",
@@ -41,6 +41,8 @@ QUERY_FIELDS = (
     "aggregation_options",
     "time_bin",
     "filter_logic",
+    "base_filter_expression",
+    "filter_expression",
     "required_filters",
     "filters",
     "sort",
@@ -198,6 +200,20 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
         if not isinstance(item, dict):
             raise ConfigurationError("each required filter must be an object")
         _filter_expression(item, schema)
+    raw_base_filter_expression = raw.get("base_filter_expression")
+    raw_filter_expression = raw.get("filter_expression")
+    if raw_base_filter_expression is not None and not isinstance(
+        raw_base_filter_expression, str
+    ):
+        raise ConfigurationError("layer base filter expression must be a string or null")
+    if raw_filter_expression is not None and not isinstance(raw_filter_expression, str):
+        raise ConfigurationError("layer filter expression must be a string or null")
+    base_filter_expression = str(raw_base_filter_expression or "").strip() or None
+    filter_expression = str(raw_filter_expression or "").strip() or None
+    if base_filter_expression:
+        catalog.filter_expression(base_filter_expression, schema)
+    if filter_expression:
+        catalog.filter_expression(filter_expression, schema)
     filter_logic = raw.get("filter_logic", "and")
     if filter_logic not in {"and", "or"}:
         raise ConfigurationError("filter logic must be and or or")
@@ -306,6 +322,8 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
         "aggregation_options": aggregation_options,
         "time_bin": time_bin,
         "filter_logic": filter_logic,
+        "base_filter_expression": base_filter_expression,
+        "filter_expression": filter_expression,
         "required_filters": required_filters,
         "filters": filters,
         "sort": sort,
@@ -385,10 +403,18 @@ class QueryEngine:
         required_expressions = [
             _filter_expression(item, schema) for item in layer["required_filters"]
         ]
+        if layer["base_filter_expression"]:
+            required_expressions.append(
+                self.catalog.filter_expression(layer["base_filter_expression"], schema)
+            )
         if required_expressions:
             base = base.filter(pl.all_horizontal(required_expressions))
         lazy = base
         expressions = [_filter_expression(item, schema) for item in layer["filters"]]
+        if layer["filter_expression"]:
+            expressions.append(
+                self.catalog.filter_expression(layer["filter_expression"], schema)
+            )
         if expressions:
             combined = (
                 pl.all_horizontal(expressions)
