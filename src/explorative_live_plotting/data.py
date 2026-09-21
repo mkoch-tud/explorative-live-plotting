@@ -161,6 +161,16 @@ class DataCatalog:
         with self._lock:
             return self._config_module_name
 
+    def clone(self) -> DataCatalog:
+        """Clone catalog configuration and cached schemas for an isolated workspace."""
+        cloned = DataCatalog()
+        with self._lock, cloned._lock:
+            cloned._sources = dict(self._sources)
+            cloned._schemas = dict(self._schemas)
+            cloned._config_module_name = self._config_module_name
+            cloned._config_module = self._config_module
+        return cloned
+
     def set_config_module(self, name: str | None) -> list[dict[str, Any]]:
         """Change the path-variable module after validating every existing source."""
         normalized = str(name or "").strip() or None

@@ -5,6 +5,7 @@ from __future__ import annotations
 from io import BytesIO
 import os
 from pathlib import Path
+import re
 from threading import Lock
 import time
 from typing import Any
@@ -28,6 +29,16 @@ from .plotting import (
 from .query import QueryEngine
 from .registry import Registry
 
+WORKSPACE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+
+class WorkspaceState:
+    """Isolated data/query state belonging to one browser workspace tab."""
+
+    def __init__(self, catalog: DataCatalog, registry: Registry, cache: QueryCache) -> None:
+        self.catalog = catalog
+        self.engine = QueryEngine(catalog, registry, cache)
+
 
 class ApplicationState:
     def __init__(
@@ -44,6 +55,27 @@ class ApplicationState:
         self.output_dir = output_dir
         self.render_lock = Lock()
         self.system_metrics = SystemMetrics()
+        self._workspace_lock = Lock()
+        self._workspaces: dict[str, WorkspaceState] = {}
+
+    def workspace(self, identifier: str | None) -> WorkspaceState:
+        normalized = str(identifier or "default").strip()
+        if WORKSPACE_ID.fullmatch(normalized) is None:
+            raise ConfigurationError(
+                "workspace id must contain 1-64 letters, numbers, underscores, or hyphens"
+            )
+        with self._workspace_lock:
+            workspace = self._workspaces.get(normalized)
+            if workspace is None:
+                workspace = WorkspaceState(self.catalog.clone(), self.registry, self.cache)
+                self._workspaces[normalized] = workspace
+            return workspace
+
+    def remove_workspace(self, identifier: str) -> bool:
+        if WORKSPACE_ID.fullmatch(identifier) is None:
+            raise ConfigurationError("invalid workspace id")
+        with self._workspace_lock:
+            return self._workspaces.pop(identifier, None) is not None
 
 
 class SystemMetrics:
@@ -192,25 +224,33 @@ def create_app(state: ApplicationState) -> Flask:
     def index():
         return render_template("index.html")
 
+    def current_workspace() -> WorkspaceState:
+        return state.workspace(request.headers.get("X-ELP-Workspace"))
+
     @app.get("/api/bootstrap")
     def bootstrap():
+        workspace = current_workspace()
         return jsonify(
             {
-                "sources": state.catalog.all_metadata(),
+                "sources": workspace.catalog.all_metadata(),
                 "registry": state.registry.metadata(),
-                "config_module": state.catalog.config_module,
-                "expression_variables": state.catalog.expression_variables(),
-                "default_config": default_config(state.catalog.config_module),
+                "config_module": workspace.catalog.config_module,
+                "expression_variables": workspace.catalog.expression_variables(),
+                "default_config": default_config(workspace.catalog.config_module),
                 "output_dir": str(state.output_dir),
             }
         )
+
+    @app.delete("/api/workspaces/<identifier>")
+    def delete_workspace(identifier: str):
+        return jsonify({"removed": state.remove_workspace(identifier)})
 
     @app.get("/api/path-suggestions")
     def path_suggestions():
         value = request.args.get("value", "")
         if len(value) > 4096:
             raise ConfigurationError("source path is too long")
-        return jsonify(state.catalog.complete_path(value))
+        return jsonify(current_workspace().catalog.complete_path(value))
 
     @app.get("/api/system-stats")
     def system_stats():
@@ -228,39 +268,42 @@ def create_app(state: ApplicationState) -> Flask:
             raise ConfigurationError("config module request must be an object")
         module = str(raw.get("module") or "").strip() or None
         raw_sources = raw.get("sources")
+        workspace = current_workspace()
         with state.render_lock:
             if raw_sources is not None:
                 if not isinstance(raw_sources, list):
                     raise ConfigurationError("sources must be an array")
-                sources = state.catalog.replace_sources(
+                sources = workspace.catalog.replace_sources(
                     [_source_spec(item) for item in raw_sources], module
                 )
             else:
-                sources = state.catalog.set_config_module(module)
+                sources = workspace.catalog.set_config_module(module)
         log(f"Config module set to: {module or '(none)'}")
         return jsonify(
             {
                 "config_module": module,
                 "sources": sources,
-                "expression_variables": state.catalog.expression_variables(),
+                "expression_variables": workspace.catalog.expression_variables(),
             }
         )
 
     @app.post("/api/sources")
     def add_source():
-        metadata = state.catalog.add(_source_spec(request.get_json(silent=False)))
+        metadata = current_workspace().catalog.add(
+            _source_spec(request.get_json(silent=False))
+        )
         log(f"Registered lazy source {metadata['name']}: {metadata['path']}")
         return jsonify(metadata), 201
 
     @app.delete("/api/sources/<name>")
     def remove_source(name: str):
-        state.catalog.remove(name)
+        current_workspace().catalog.remove(name)
         return jsonify({"removed": name})
 
     @app.get("/api/sources/<name>/preview")
     def source_preview(name: str):
         rows = max(1, min(100, int(request.args.get("rows", "10"))))
-        frame = state.catalog.lazy(name).head(rows).collect(engine="streaming")
+        frame = current_workspace().catalog.lazy(name).head(rows).collect(engine="streaming")
         return jsonify({"columns": frame.columns, "rows": frame.to_dicts()})
 
     @app.get("/api/sources/<name>/column-excerpt")
@@ -272,7 +315,7 @@ def create_app(state: ApplicationState) -> Flask:
             intermediate = int(request.args.get("intermediate", "3"))
         except ValueError as error:
             raise ConfigurationError("intermediate value count must be an integer") from error
-        return jsonify(state.catalog.column_excerpt(name, column, intermediate))
+        return jsonify(current_workspace().catalog.column_excerpt(name, column, intermediate))
 
     @app.get("/api/sources/<name>/column-values")
     def source_column_values(name: str):
@@ -284,11 +327,11 @@ def create_app(state: ApplicationState) -> Flask:
             limit = int(request.args.get("limit", "250"))
         except ValueError as error:
             raise ConfigurationError("column-value offset and limit must be integers") from error
-        return jsonify(state.catalog.column_values(name, column, offset, limit))
+        return jsonify(current_workspace().catalog.column_values(name, column, offset, limit))
 
-    def request_config() -> dict[str, Any]:
+    def request_config(workspace: WorkspaceState) -> dict[str, Any]:
         config = validate_config(request.get_json(silent=False), state.registry)
-        if config["config_module"] != state.catalog.config_module:
+        if config["config_module"] != workspace.catalog.config_module:
             raise ConfigurationError(
                 "configuration module has not been applied; apply it before rendering or exporting"
             )
@@ -296,16 +339,18 @@ def create_app(state: ApplicationState) -> Flask:
 
     @app.post("/api/validate")
     def validate():
-        config = request_config()
+        workspace = current_workspace()
+        config = request_config(workspace)
         for layer in config["layers"]:
             if layer.get("enabled", True):
-                state.engine.execute(layer)
+                workspace.engine.execute(layer)
         return jsonify(config)
 
     def render(formats: list[str] | None = None):
-        config = request_config()
+        workspace = current_workspace()
+        config = request_config(workspace)
         with state.render_lock:
-            return config, render_artifacts(config, state.engine, state.registry, formats)
+            return config, render_artifacts(config, workspace.engine, state.registry, formats)
 
     @app.post("/api/render")
     def render_preview():
@@ -319,9 +364,10 @@ def create_app(state: ApplicationState) -> Flask:
 
     @app.post("/api/export-code")
     def export_code():
-        config = request_config()
+        workspace = current_workspace()
+        config = request_config(workspace)
         with state.render_lock:
-            script = generate_script(config, state.catalog, state.registry)
+            script = generate_script(config, workspace.catalog, state.registry)
         return send_file(
             BytesIO(script.encode()),
             as_attachment=True,

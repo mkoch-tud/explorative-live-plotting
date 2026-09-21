@@ -145,6 +145,22 @@ The **Show RAM/CPU** checkbox in the page header enables a bottom-right system
 usage display. It reads lightweight host CPU and memory counters every ten
 seconds and remains inactive when unchecked.
 
+## Workspace tabs
+
+Use **+ New workspace** above the configuration panel to open another plotting
+workspace in the same page. Each tab keeps an independent configuration module,
+source catalog, source-entry draft, layers, figure settings, render status, and
+preview. This allows sources with the same name to refer to different files in
+different tabs without collisions.
+
+Click a tab to switch to it, double-click its name to rename it, and use its
+close button to release its server-side catalog. An orange dot marks a workspace
+whose query settings have changed since its last render. Query result files are
+content-addressed and shared between workspaces, so identical queries can still
+reuse cached results without sharing editable state. Workspace tabs last for the
+current page session; downloaded JSON configurations remain the persistent way
+to save an exploration across application restarts.
+
 ## Query and plot model
 
 Each plot is composed of independent layers. A layer selects:

@@ -14,6 +14,10 @@ let filterControlSequence = 0;
 const filterSampleCache = new WeakMap();
 const filterTimeValueCache = new WeakMap();
 const STD_COLORS = ['#375E97', '#FB6542', '#c1195c', '#37975e'];
+let workspaces = [];
+let activeWorkspaceId = null;
+let workspaceNumber = 0;
+let workspaceSwitchSequence = 0;
 
 const escapeHtml = value => String(value).replace(
   /[&<>"]/g,
@@ -41,9 +45,130 @@ function message(text, error = false) {
   $('message').textContent = text;
   $('message').className = error ? 'error' : '';
 }
+const previewMarkup = previews => previews.map(item => `<div class="preview"><strong>${escapeHtml(item.filename)}</strong><img alt="${escapeHtml(item.filename)}" src="${item.image}"></div>`).join('');
 function updatePreviews(previews) {
   if (!Array.isArray(previews)) return;
-  $('previews').innerHTML = previews.map(item => `<div class="preview"><strong>${escapeHtml(item.filename)}</strong><img alt="${escapeHtml(item.filename)}" src="${item.image}"></div>`).join('');
+  $('previews').innerHTML = previewMarkup(previews);
+}
+
+function apiFetch(path, options = {}, workspaceId = activeWorkspaceId) {
+  const headers = new Headers(options.headers ?? {});
+  if (workspaceId) headers.set('X-ELP-Workspace', workspaceId);
+  return window.fetch(path, {...options, headers});
+}
+
+const workspaceById = id => workspaces.find(item => item.id === id);
+const newWorkspaceId = () => {
+  const random = globalThis.crypto?.randomUUID?.().replaceAll('-', '') ?? `${Date.now()}${Math.random().toString(16).slice(2)}`;
+  return `workspace_${random}`.slice(0, 64);
+};
+
+function sourceDraft() {
+  return {
+    name: $('source-name').value, path: $('source-path').value,
+    format: $('source-format').value, separator: $('source-separator').value,
+    filterExpression: $('source-filter-expression').value,
+    options: $('source-options').value,
+  };
+}
+
+function applySourceDraft(draft = {}) {
+  $('source-name').value = draft.name ?? '';
+  $('source-path').value = draft.path ?? '';
+  $('source-format').value = draft.format ?? 'auto';
+  $('source-separator').value = draft.separator ?? '';
+  $('source-filter-expression').value = draft.filterExpression ?? '';
+  $('source-options').value = draft.options ?? '{}';
+  renderPathSuggestions([]); $('source-path-resolved').textContent = '';
+}
+
+function snapshotActiveWorkspace() {
+  const workspace = workspaceById(activeWorkspaceId);
+  if (!workspace || !config) return;
+  workspace.config = collect();
+  workspace.bootstrap = bootstrap;
+  workspace.previewHtml = $('previews').innerHTML;
+  workspace.message = {text: $('message').textContent, error: $('message').classList.contains('error')};
+  workspace.queryDirty = queryDirty;
+  workspace.sourceDraft = sourceDraft();
+}
+
+function renderWorkspaceTabs() {
+  const root = $('workspace-tabs'); root.innerHTML = '';
+  for (const workspace of workspaces) {
+    const tab = document.createElement('div');
+    tab.className = `workspace-tab${workspace.id === activeWorkspaceId ? ' active' : ''}`;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(workspace.id === activeWorkspaceId));
+    const dirty = workspace.queryDirty ? '<span class="workspace-dirty" title="Not rendered">●</span>' : '';
+    tab.innerHTML = `<button class="workspace-tab-name" type="button" title="Double-click to rename">${dirty}${escapeHtml(workspace.title)}</button><button class="workspace-tab-close" type="button" aria-label="Close ${escapeHtml(workspace.title)}" ${workspaces.length === 1 ? 'disabled' : ''}>×</button>`;
+    tab.querySelector('.workspace-tab-name').onclick = () => switchWorkspace(workspace.id);
+    tab.querySelector('.workspace-tab-name').ondblclick = event => {
+      event.preventDefault();
+      const title = window.prompt('Workspace name', workspace.title)?.trim();
+      if (title) { workspace.title = title.slice(0, 80); renderWorkspaceTabs(); }
+    };
+    tab.querySelector('.workspace-tab-close').onclick = event => {
+      event.stopPropagation(); closeWorkspace(workspace.id);
+    };
+    root.appendChild(tab);
+  }
+  root.querySelector('.workspace-tab.active')?.scrollIntoView({block: 'nearest', inline: 'nearest'});
+}
+
+async function initializeWorkspace(workspace) {
+  if (workspace.initialized) return true;
+  const response = await apiFetch('/api/bootstrap', {}, workspace.id);
+  if (!response.ok) { await apiError(response); return false; }
+  workspace.bootstrap = await response.json();
+  workspace.config = workspace.bootstrap.default_config;
+  workspace.previewHtml = '';
+  workspace.message = {text: 'Ready. Add a source and layer, then render.', error: false};
+  workspace.queryDirty = true;
+  workspace.sourceDraft = {};
+  workspace.initialized = true;
+  return true;
+}
+
+async function switchWorkspace(identifier) {
+  if (identifier === activeWorkspaceId) return;
+  snapshotActiveWorkspace();
+  clearTimeout(liveTimer); clearTimeout(pathSuggestionTimer);
+  renderSequence += 1; queryRevision += 1; pathSuggestionSequence += 1;
+  const sequence = ++workspaceSwitchSequence;
+  activeWorkspaceId = identifier; renderWorkspaceTabs();
+  const workspace = workspaceById(identifier);
+  if (!workspace || !await initializeWorkspace(workspace)) return;
+  if (sequence !== workspaceSwitchSequence || identifier !== activeWorkspaceId) return;
+  bootstrap = workspace.bootstrap;
+  apply(workspace.config);
+  applySourceDraft(workspace.sourceDraft);
+  $('previews').innerHTML = workspace.previewHtml ?? '';
+  queryDirty = workspace.queryDirty ?? true;
+  message(workspace.message?.text ?? 'Ready.', workspace.message?.error ?? false);
+  renderExpressionSymbols(); renderSources(); renderWorkspaceTabs();
+}
+
+async function addWorkspace() {
+  const workspace = {
+    id: newWorkspaceId(), title: `Workspace ${++workspaceNumber}`,
+    initialized: false, queryDirty: true,
+  };
+  workspaces.push(workspace); renderWorkspaceTabs();
+  await switchWorkspace(workspace.id);
+}
+
+async function closeWorkspace(identifier) {
+  if (workspaces.length <= 1) return;
+  const index = workspaces.findIndex(item => item.id === identifier);
+  if (index < 0) return;
+  if (identifier === activeWorkspaceId) snapshotActiveWorkspace();
+  workspaces.splice(index, 1); renderWorkspaceTabs();
+  apiFetch(`/api/workspaces/${encodeURIComponent(identifier)}`, {method: 'DELETE'}, identifier).catch(() => {});
+  if (identifier === activeWorkspaceId) {
+    activeWorkspaceId = null;
+    await switchWorkspace(workspaces[Math.min(index, workspaces.length - 1)].id);
+  }
 }
 function numberValue(id) { return $(id).value === '' ? null : Number($(id).value); }
 function scalarValue(id) { return $(id).value.trim() === '' ? null : scalar($(id).value); }
@@ -106,7 +231,7 @@ async function updatePathSuggestions() {
     $('source-path-resolved').textContent = '';
     return;
   }
-  const response = await fetch(`/api/path-suggestions?value=${encodeURIComponent(value)}`);
+  const response = await apiFetch(`/api/path-suggestions?value=${encodeURIComponent(value)}`);
   if (!response.ok) return;
   const result = await response.json();
   if (sequence !== pathSuggestionSequence || value !== $('source-path').value) return;
@@ -122,7 +247,7 @@ function schedulePathSuggestions() {
 }
 
 async function updateSystemStats() {
-  const response = await fetch('/api/system-stats');
+  const response = await apiFetch('/api/system-stats');
   if (!response.ok) throw new Error('System metrics unavailable');
   const stats = await response.json();
   const cpu = stats.cpu_percent === null ? '—' : `${stats.cpu_percent.toFixed(1)}%`;
@@ -274,10 +399,17 @@ function renderSources() {
       ? `<small>Global filter</small><code>${escapeHtml(item.filter_expression)}</code>` : '';
     div.innerHTML = `<div class="source-head"><strong>${escapeHtml(item.name)}</strong><button class="remove">Remove</button></div><small>${escapeHtml(item.format)} · ${item.columns.length} columns</small><code>${escapeHtml(item.path)}</code>${resolved}${sourceFilter}`;
     div.querySelector('button').onclick = async () => {
-      const response = await fetch(`/api/sources/${encodeURIComponent(item.name)}`, {method: 'DELETE'});
-      if (!response.ok) return apiError(response);
-      bootstrap.sources = bootstrap.sources.filter(x => x.name !== item.name);
-      config.layers = config.layers.filter(x => x.source !== item.name);
+      const workspaceId = activeWorkspaceId;
+      const currentWorkspace = workspaceById(workspaceId);
+      if (currentWorkspace) currentWorkspace.config = collect();
+      const response = await apiFetch(`/api/sources/${encodeURIComponent(item.name)}`, {method: 'DELETE'}, workspaceId);
+      if (!response.ok) return apiError(response, workspaceId);
+      const workspace = workspaceById(workspaceId);
+      if (!workspace) return;
+      workspace.bootstrap.sources = workspace.bootstrap.sources.filter(x => x.name !== item.name);
+      workspace.config.layers = workspace.config.layers.filter(x => x.source !== item.name);
+      if (workspaceId !== activeWorkspaceId) return;
+      bootstrap = workspace.bootstrap; config = workspace.config;
       reconcileStages(); renderSources(); renderLayers(); renderStages(); changed(true);
     };
     $('sources').appendChild(div);
@@ -320,7 +452,7 @@ async function loadTimeValuePage(layer, item, select, status) {
   state.loading = true; renderTimeValueSelect(select, status, item, state);
   state.pending = (async () => {
     try {
-      const response = await fetch(`/api/sources/${encodeURIComponent(layer.source)}/column-values?column=${encodeURIComponent(item.column)}&offset=${state.offset}&limit=250`);
+      const response = await apiFetch(`/api/sources/${encodeURIComponent(layer.source)}/column-values?column=${encodeURIComponent(item.column)}&offset=${state.offset}&limit=250`);
       if (!response.ok) { await apiError(response); return; }
       const result = await response.json();
       state.values.push(...(result.values ?? []));
@@ -388,7 +520,7 @@ function filterRow(layer, item, siblings, index) {
   div.querySelector('.remove').onclick = () => { siblings.splice(index, 1); renderLayers(); changed(true); };
   div.querySelector('.query-filter-values').onclick = async event => {
     const button = event.currentTarget; button.disabled = true; button.textContent = 'Querying…';
-    const response = await fetch(`/api/sources/${encodeURIComponent(layer.source)}/column-excerpt?column=${encodeURIComponent(item.column)}&intermediate=3`);
+    const response = await apiFetch(`/api/sources/${encodeURIComponent(layer.source)}/column-excerpt?column=${encodeURIComponent(item.column)}&intermediate=3`);
     if (!response.ok) { await apiError(response); button.disabled = false; button.textContent = 'Query 5 values'; return; }
     const result = await response.json(); filterSampleCache.set(item, result); renderLayers();
     message(`Loaded ${result.values.length} representative value(s) for ${item.column}; only that column was projected.`);
@@ -806,6 +938,9 @@ function apply(next) {
 function changed(queryChanged = true) {
   if (queryChanged) {
     queryRevision += 1; queryDirty = true; clearTimeout(liveTimer);
+    const workspace = workspaceById(activeWorkspaceId);
+    if (workspace) workspace.queryDirty = true;
+    renderWorkspaceTabs();
     message('Query configuration changed; render to update.'); return;
   }
   if (queryDirty) return message('Style changed; finish the query settings and click Render.');
@@ -815,31 +950,45 @@ function changed(queryChanged = true) {
   if (!config.layers.some(layer => layer.enabled !== false)) return;
   clearTimeout(liveTimer); liveTimer = setTimeout(() => post('/api/render', false, true), 300);
 }
-async function apiError(response) {
+async function apiError(response, workspaceId = activeWorkspaceId) {
   let body; try { body = await response.json(); } catch { body = {error: response.statusText}; }
-  message(body.error ?? response.statusText, true); return body.error ?? response.statusText;
+  const text = body.error ?? response.statusText;
+  const workspace = workspaceById(workspaceId);
+  if (workspace) workspace.message = {text, error: true};
+  if (workspaceId === activeWorkspaceId) message(text, true);
+  return text;
 }
 async function applyConfigModule(showMessage = true) {
+  const workspaceId = activeWorkspaceId;
+  const currentWorkspace = workspaceById(workspaceId);
+  if (currentWorkspace) currentWorkspace.config = collect();
   const requested = $('config-module').value.trim() || null;
   if (requested === (bootstrap.config_module ?? null)) return true;
-  const response = await fetch('/api/config-module', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module: requested})});
-  if (!response.ok) { await apiError(response); return false; }
-  const result = await response.json(); bootstrap.config_module = result.config_module;
-  bootstrap.sources = result.sources; bootstrap.expression_variables = result.expression_variables ?? [];
-  config.config_module = result.config_module; renderExpressionSymbols();
+  const response = await apiFetch('/api/config-module', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module: requested})}, workspaceId);
+  if (!response.ok) { await apiError(response, workspaceId); return false; }
+  const result = await response.json(); const workspace = workspaceById(workspaceId);
+  if (!workspace) return false;
+  workspace.bootstrap.config_module = result.config_module;
+  workspace.bootstrap.sources = result.sources;
+  workspace.bootstrap.expression_variables = result.expression_variables ?? [];
+  workspace.config.config_module = result.config_module; workspace.queryDirty = true;
+  if (workspaceId !== activeWorkspaceId) return false;
+  bootstrap = workspace.bootstrap; config = workspace.config; renderExpressionSymbols();
   queryRevision += 1; queryDirty = true; clearTimeout(liveTimer);
   renderSources(); renderLayers(); schedulePathSuggestions();
   if (showMessage) message(`Config module applied: ${result.config_module ?? '(none)'}.`);
   return true;
 }
 async function post(path, download = false, live = false) {
+  const workspaceId = activeWorkspaceId;
   if (live && queryDirty) return;
   if (!await applyConfigModule(false)) return;
+  if (workspaceId !== activeWorkspaceId) return;
   let body; try { body = collect(); } catch (error) { return message(error.message, true); }
   const sequence = ++renderSequence; const revision = queryRevision;
   if (!live) message('Working…');
-  const response = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-  if (!response.ok) return apiError(response);
+  const response = await apiFetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}, workspaceId);
+  if (!response.ok) return apiError(response, workspaceId);
   if (download) {
     const blob = await response.blob(); const link = document.createElement('a');
     const disposition = response.headers.get('content-disposition') ?? '';
@@ -850,8 +999,20 @@ async function post(path, download = false, live = false) {
     message('Download prepared.'); return;
   }
   const result = await response.json();
+  const workspace = workspaceById(workspaceId);
+  if (workspace) {
+    workspace.config = body;
+    workspace.previewHtml = previewMarkup(result.previews ?? []);
+    workspace.queryDirty = false;
+    workspace.message = {
+      text: result.files ? `Saved: ${result.files.join(', ')}` : 'Rendered.', error: false,
+    };
+  }
   if (sequence !== renderSequence || revision !== queryRevision) return;
   queryDirty = false;
+  const activeWorkspace = workspaceById(activeWorkspaceId);
+  if (activeWorkspace) activeWorkspace.queryDirty = false;
+  renderWorkspaceTabs();
   updatePreviews(result.previews);
   const summaries = (result.cache ?? []).map(item => `${item.layer}: ${item.rows} rows, ${item.grouping}${item.every ? ` every ${item.every}` : ''}`);
   message(result.files ? `Saved: ${result.files.join(', ')}` : `Rendered. ${summaries.join('; ')}`);
@@ -885,6 +1046,7 @@ function bindPresentationControls() {
 }
 
 $('apply-config-module').onclick = () => applyConfigModule();
+$('add-workspace').onclick = () => addWorkspace();
 $('source-path').oninput = schedulePathSuggestions;
 $('source-path').onfocus = schedulePathSuggestions;
 $('source-path').onkeydown = event => {
@@ -904,13 +1066,20 @@ $('source-path').onkeydown = event => {
 $('source-path').onblur = () => setTimeout(() => renderPathSuggestions([]), 120);
 $('show-system-stats').onchange = event => setSystemStatsEnabled(event.target.checked);
 $('add-source').onclick = async () => {
+  const workspaceId = activeWorkspaceId;
   if (!await applyConfigModule(false)) return;
+  if (workspaceId !== activeWorkspaceId) return;
   const submitted = {name: $('source-name').value, path: $('source-path').value, format: $('source-format').value, separator: $('source-separator').value, filterExpression: $('source-filter-expression').value, optionsText: $('source-options').value};
   let options; try { options = JSON.parse(submitted.optionsText || '{}'); } catch { return message('Invalid source options JSON', true); }
   message(`Inferring ${submitted.name || 'source'} schema from the first 100 rows in the background…`);
-  const response = await fetch('/api/sources', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: submitted.name, path: submitted.path, format: submitted.format, separator: submitted.separator, filter_expression: submitted.filterExpression, options})});
-  if (!response.ok) return apiError(response);
-  const added = await response.json(); bootstrap.sources = bootstrap.sources.filter(item => item.name !== added.name); bootstrap.sources.push(added);
+  const response = await apiFetch('/api/sources', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: submitted.name, path: submitted.path, format: submitted.format, separator: submitted.separator, filter_expression: submitted.filterExpression, options})}, workspaceId);
+  if (!response.ok) return apiError(response, workspaceId);
+  const added = await response.json(); const workspace = workspaceById(workspaceId);
+  if (!workspace) return;
+  workspace.bootstrap.sources = workspace.bootstrap.sources.filter(item => item.name !== added.name); workspace.bootstrap.sources.push(added);
+  workspace.queryDirty = true;
+  if (workspaceId !== activeWorkspaceId) return;
+  bootstrap = workspace.bootstrap;
   $('source-name').value = ''; $('source-path').value = ''; $('source-format').value = 'auto'; $('source-separator').value = ''; $('source-filter-expression').value = ''; $('source-options').value = '{}';
   renderPathSuggestions([]); $('source-path-resolved').textContent = '';
   renderSources(); renderLayers(); message('Lazy source registered.');
@@ -935,40 +1104,44 @@ $('add-stage').onclick = () => {
 };
 $('render').onclick = () => post('/api/render'); $('save').onclick = () => post('/api/save');
 $('download').onclick = () => post('/api/download', true); $('export-code').onclick = () => post('/api/export-code', true);
-$('clear-cache').onclick = async () => { await fetch('/api/cache/clear', {method: 'POST'}); message('Cache cleared.'); };
+$('clear-cache').onclick = async () => { await apiFetch('/api/cache/clear', {method: 'POST'}); message('Cache cleared.'); };
 $('load-config').onchange = async event => {
+  const workspaceId = activeWorkspaceId;
+  const workspace = workspaceById(workspaceId);
+  if (!workspace) return;
+  const targetBootstrap = workspace.bootstrap;
   let loaded; try { loaded = JSON.parse(await event.target.files[0].text()); }
   catch (error) { return message(`Invalid configuration: ${error.message}`, true); }
-  const migrationResponse = await fetch('/api/migrate-config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(loaded)});
-  if (!migrationResponse.ok) return apiError(migrationResponse);
+  const migrationResponse = await apiFetch('/api/migrate-config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(loaded)}, workspaceId);
+  if (!migrationResponse.ok) return apiError(migrationResponse, workspaceId);
   const migration = await migrationResponse.json(); loaded = migration.config;
   const issues = [...(migration.warnings ?? [])];
   if (!Array.isArray(loaded.sources)) { issues.push('sources: expected an array; no sources were loaded'); loaded.sources = []; }
   if (!Array.isArray(loaded.layers)) { issues.push('layers: expected an array; no layers were loaded'); loaded.layers = []; }
   let module = loaded.config_module ?? null;
-  let response = await fetch('/api/config-module', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module, sources: []})});
+  let response = await apiFetch('/api/config-module', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module, sources: []})}, workspaceId);
   if (!response.ok && module !== null) {
     const body = await response.json().catch(() => ({error: response.statusText}));
     issues.push(`config_module: ${body.error ?? response.statusText}; continued without it`);
     module = null;
-    response = await fetch('/api/config-module', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module, sources: []})});
+    response = await apiFetch('/api/config-module', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module, sources: []})}, workspaceId);
   }
-  if (!response.ok) return apiError(response);
-  const result = await response.json(); bootstrap.config_module = result.config_module; bootstrap.sources = [];
-  bootstrap.expression_variables = result.expression_variables ?? []; renderExpressionSymbols();
+  if (!response.ok) return apiError(response, workspaceId);
+  const result = await response.json(); targetBootstrap.config_module = result.config_module; targetBootstrap.sources = [];
+  targetBootstrap.expression_variables = result.expression_variables ?? [];
   const loadedSources = [];
   for (const sourceSpec of loaded.sources) {
-    const sourceResponse = await fetch('/api/sources', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(sourceSpec)});
+    const sourceResponse = await apiFetch('/api/sources', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(sourceSpec)}, workspaceId);
     if (!sourceResponse.ok) {
       const body = await sourceResponse.json().catch(() => ({error: sourceResponse.statusText}));
       issues.push(`source ${sourceSpec.name ?? '(unnamed)'}: ${body.error ?? sourceResponse.statusText}`);
       continue;
     }
-    const added = await sourceResponse.json(); bootstrap.sources.push(added);
+    const added = await sourceResponse.json(); targetBootstrap.sources.push(added);
     loadedSources.push(sourceSpec);
   }
-  loaded.config_module = bootstrap.config_module; loaded.sources = loadedSources;
-  const sourceNames = new Set(bootstrap.sources.map(item => item.name));
+  loaded.config_module = targetBootstrap.config_module; loaded.sources = loadedSources;
+  const sourceNames = new Set(targetBootstrap.sources.map(item => item.name));
   loaded.layers = loaded.layers.filter((layer, index) => {
     if (!layer || typeof layer !== 'object' || Array.isArray(layer)) {
       issues.push(`layer ${index + 1}: expected an object; layer skipped`); return false;
@@ -978,11 +1151,11 @@ $('load-config').onchange = async event => {
       issues.push(`layer ${layer.label ?? layer.id ?? '(unnamed)'}: source ${layer.source ?? '(none)'} was not loaded; layer disabled`);
       return true;
     }
-    const metadata = bootstrap.sources.find(item => item.name === layer.source);
+    const metadata = targetBootstrap.sources.find(item => item.name === layer.source);
     const layerColumns = new Set((metadata?.columns ?? []).map(item => item.name));
     const invalid = [];
-    if (!bootstrap.registry.plot_types.includes(layer.plot_type ?? 'line')) invalid.push(`unknown plot type ${layer.plot_type}`);
-    if (!bootstrap.registry.aggregations.includes(layer.aggregation ?? 'none')) invalid.push(`unknown aggregation ${layer.aggregation}`);
+    if (!targetBootstrap.registry.plot_types.includes(layer.plot_type ?? 'line')) invalid.push(`unknown plot type ${layer.plot_type}`);
+    if (!targetBootstrap.registry.aggregations.includes(layer.aggregation ?? 'none')) invalid.push(`unknown aggregation ${layer.aggregation}`);
     if (!['histogram', 'box', 'violin'].includes(layer.plot_type ?? 'line') && !layer.x_column) invalid.push('missing X-column selection');
     if (!['count', 'relative_count'].includes(layer.aggregation ?? 'none') && !layer.y_column) invalid.push('missing Y-column selection');
     if (layer.x_column && !layerColumns.has(layer.x_column)) invalid.push(`missing X column ${layer.x_column}`);
@@ -997,14 +1170,17 @@ $('load-config').onchange = async event => {
     }
     return true;
   });
-  renderSources(); apply(loaded);
-  message(issues.length ? `Configuration loaded with issues: ${issues.join(' · ')}` : 'Configuration loaded.', Boolean(issues.length));
+  workspace.config = loaded; workspace.queryDirty = true;
+  workspace.message = {text: issues.length ? `Configuration loaded with issues: ${issues.join(' · ')}` : 'Configuration loaded.', error: Boolean(issues.length)};
+  if (workspaceId === activeWorkspaceId) {
+    bootstrap = targetBootstrap; renderExpressionSymbols(); renderSources(); apply(loaded);
+    message(workspace.message.text, workspace.message.error); renderWorkspaceTabs();
+  }
 };
 
 bindPresentationControls();
 setupPanelResizer();
 (async () => {
-  const response = await fetch('/api/bootstrap'); bootstrap = await response.json();
-  config = bootstrap.default_config; renderExpressionSymbols(); renderSources(); apply(config);
+  await addWorkspace();
   message('Ready. Query changes render on demand; style changes update live from cache.');
 })().catch(error => message(error.message, true));
