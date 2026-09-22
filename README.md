@@ -110,6 +110,38 @@ layer expression and select `relative_count` with `{"scale":"percent"}`.
 
 ## Portable paths and repository integration
 
+### Cookiecutter Data Science (CCDS) integration
+
+Keep ELP outside the project's Python package, for example under `tools/`, and
+install it through the root requirements file used by `make requirements`:
+
+```bash
+git submodule add git@github.com:mkoch-tud/explorative-live-plotting.git tools/explorative-live-plotting
+git submodule update --init --recursive
+```
+
+```text
+# requirements.txt
+-e ./tools/explorative-live-plotting
+```
+
+After `make requirements`, run `elp` from the project root. A typical layout is:
+
+```text
+project/
+├── project_name/
+│   └── config.py
+├── tools/explorative-live-plotting/
+├── requirements.txt
+└── Makefile
+```
+
+ELP auto-detects `project_name.config` when exactly one importable local package
+with a `config.py` (or `config/__init__.py`) exists in the project root or
+`src/`. Use `elp --config-module project_name.config` to override detection or
+choose among multiple candidates. Clone the parent repository with
+`--recurse-submodules` so its ELP checkout is populated.
+
 When this workbench is installed into or alongside another Python repository,
 it can import path values from that repository's existing configuration module.
 Run `elp` from the target repository root so its package and ordinary relative

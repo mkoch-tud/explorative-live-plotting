@@ -7,6 +7,7 @@ from datetime import date, datetime
 import glob
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,47 @@ FORMATS = {"auto", "csv", "parquet", "ndjson", "ipc"}
 MODULE_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
 PATH_VARIABLE = re.compile(r"\$\{([A-Za-z_]\w*)\}")
 SCHEMA_HEAD_ROWS = 100
+
+
+def discover_local_config_modules(root: Path | None = None) -> list[str]:
+    """Return importable local ``<package>.config`` modules."""
+
+    project_root = (root or Path.cwd()).resolve()
+    candidates: set[str] = set()
+
+    for package_root in (project_root, project_root / "src"):
+        if not package_root.is_dir():
+            continue
+        for package_dir in package_root.iterdir():
+            if (
+                not package_dir.is_dir()
+                or not package_dir.name.isidentifier()
+                or not (package_dir / "__init__.py").is_file()
+            ):
+                continue
+
+            config_file = package_dir / "config.py"
+            config_package = package_dir / "config" / "__init__.py"
+            expected_origin = config_file if config_file.is_file() else config_package
+            if not expected_origin.is_file():
+                continue
+
+            module_name = f"{package_dir.name}.config"
+            try:
+                spec = importlib.util.find_spec(module_name)
+            except Exception:
+                continue
+            if spec is None or spec.origin is None:
+                continue
+            try:
+                resolved_origin = Path(spec.origin).resolve()
+            except (OSError, TypeError):
+                continue
+            if resolved_origin == expected_origin.resolve():
+                candidates.add(module_name)
+
+    return sorted(candidates)
+
 
 _SIMPLE_POLARS_DTYPES = {
     name.casefold(): getattr(pl, name)

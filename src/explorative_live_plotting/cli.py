@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from .cache import QueryCache
-from .data import DataCatalog, SourceSpec
+from .data import DataCatalog, SourceSpec, discover_local_config_modules
 from .logging import log
 from .registry import builtins, load_plugin
 from .server import ApplicationState, create_app
@@ -42,7 +42,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config-module",
-        help="Import portable source-path variables from a dotted Python module.",
+        help=(
+            "Import portable source-path variables from a dotted Python module. "
+            "If omitted, a single local <package>.config module is auto-detected."
+        ),
     )
     parser.add_argument("--output-dir", type=Path, default=Path("plots"))
     parser.add_argument("--cache-dir", type=Path, default=Path(".elp-cache"))
@@ -62,9 +65,21 @@ def main() -> int:
     for path in args.plugin:
         load_plugin(path, registry)
         log(f"Loaded plugin: {path.resolve()}")
-    catalog = DataCatalog(args.config_module)
+    config_module = args.config_module
+    if config_module is None:
+        detected_modules = discover_local_config_modules()
+        if len(detected_modules) == 1:
+            config_module = detected_modules[0]
+            log(f"Auto-detected config module: {config_module}")
+        elif len(detected_modules) > 1:
+            log(
+                "Multiple local config modules found; select one with "
+                f"--config-module: {', '.join(detected_modules)}"
+            )
+
+    catalog = DataCatalog(config_module)
     if args.config_module:
-        log(f"Loaded config module: {args.config_module}")
+        log(f"Loaded config module: {config_module}")
     for spec in args.source:
         metadata = catalog.add(spec)
         log(f"Registered lazy source {metadata['name']}: {metadata['path']}")
