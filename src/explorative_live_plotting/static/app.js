@@ -9,6 +9,12 @@ let pathSuggestionTimer = null;
 let pathSuggestionSequence = 0;
 let pathSuggestions = [];
 let pathSuggestionIndex = -1;
+let outputPathSuggestionTimer = null;
+let outputPathSuggestionSequence = 0;
+let outputPathSuggestions = [];
+let outputPathSuggestionIndex = -1;
+let editingSourceName = null;
+let serverConfigDirectory = null;
 let systemStatsTimer = null;
 let filterControlSequence = 0;
 const filterSampleCache = new WeakMap();
@@ -70,6 +76,7 @@ function sourceDraft() {
     format: $('source-format').value, separator: $('source-separator').value,
     filterExpression: $('source-filter-expression').value,
     options: $('source-options').value,
+    editingSourceName,
   };
 }
 
@@ -80,6 +87,9 @@ function applySourceDraft(draft = {}) {
   $('source-separator').value = draft.separator ?? '';
   $('source-filter-expression').value = draft.filterExpression ?? '';
   $('source-options').value = draft.options ?? '{}';
+  editingSourceName = draft.editingSourceName ?? null;
+  $('add-source').textContent = editingSourceName ? 'Update source' : 'Add source';
+  $('cancel-source-edit').hidden = !editingSourceName;
   renderPathSuggestions([]); $('source-path-resolved').textContent = '';
 }
 
@@ -134,8 +144,9 @@ async function initializeWorkspace(workspace) {
 async function switchWorkspace(identifier) {
   if (identifier === activeWorkspaceId) return;
   snapshotActiveWorkspace();
-  clearTimeout(liveTimer); clearTimeout(pathSuggestionTimer);
+  clearTimeout(liveTimer); clearTimeout(pathSuggestionTimer); clearTimeout(outputPathSuggestionTimer);
   renderSequence += 1; queryRevision += 1; pathSuggestionSequence += 1;
+  outputPathSuggestionSequence += 1;
   const sequence = ++workspaceSwitchSequence;
   activeWorkspaceId = identifier; renderWorkspaceTabs();
   const workspace = workspaceById(identifier);
@@ -157,6 +168,91 @@ async function addWorkspace() {
   };
   workspaces.push(workspace); renderWorkspaceTabs();
   await switchWorkspace(workspace.id);
+}
+
+async function duplicateWorkspace() {
+  if (!activeWorkspaceId || !await applyConfigModule(false)) return;
+  snapshotActiveWorkspace();
+  const original = workspaceById(activeWorkspaceId);
+  if (!original) return;
+  const identifier = newWorkspaceId();
+  const response = await apiFetch(
+    `/api/workspaces/${encodeURIComponent(identifier)}/clone`,
+    {method: 'POST'},
+    original.id,
+  );
+  if (!response.ok) return apiError(response, original.id);
+  const duplicate = {
+    id: identifier,
+    title: `${original.title} copy`.slice(0, 80),
+    initialized: true,
+    bootstrap: structuredClone(original.bootstrap),
+    config: structuredClone(original.config),
+    previewHtml: original.previewHtml ?? '',
+    message: structuredClone(original.message ?? {text: 'Workspace duplicated.', error: false}),
+    queryDirty: original.queryDirty,
+    sourceDraft: structuredClone(original.sourceDraft ?? {}),
+  };
+  workspaces.push(duplicate); renderWorkspaceTabs();
+  await switchWorkspace(identifier);
+  message(`Duplicated ${original.title}.`);
+}
+
+async function saveAllWorkspaces() {
+  if (!await applyConfigModule(false)) return;
+  snapshotActiveWorkspace();
+  const button = $('save-all-workspaces');
+  button.disabled = true;
+  message(`Saving ${workspaces.length} workspace(s)…`);
+  const saved = []; const failures = []; const renamed = [];
+  const destinations = new Set();
+  for (const workspace of workspaces) {
+    const body = structuredClone(workspace.config);
+    const destination = () => `${body.output_dir}\u0000${body.filename}`;
+    if (destinations.has(destination())) {
+      const suffix = workspace.title.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'workspace';
+      const original = body.filename;
+      let counter = 1;
+      do {
+        const ending = counter === 1 ? `-${suffix}` : `-${suffix}-${counter}`;
+        body.filename = `${original.slice(0, Math.max(1, 128 - ending.length))}${ending}`;
+        counter += 1;
+      } while (destinations.has(destination()));
+      workspace.config.filename = body.filename;
+      renamed.push(`${workspace.title} → ${body.filename}`);
+    }
+    destinations.add(destination());
+    const response = await apiFetch(
+      '/api/save',
+      {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)},
+      workspace.id,
+    );
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({error: response.statusText}));
+      failures.push(`${workspace.title}: ${body.error ?? response.statusText}`);
+      continue;
+    }
+    const result = await response.json();
+    workspace.config = result.config ?? workspace.config;
+    workspace.previewHtml = previewMarkup(result.previews ?? []);
+    workspace.queryDirty = false;
+    workspace.message = {text: `Saved: ${(result.files ?? []).join(', ')}`, error: false};
+    saved.push(workspace.title);
+  }
+  button.disabled = false;
+  const active = workspaceById(activeWorkspaceId);
+  if (active) {
+    queryDirty = active.queryDirty;
+    $('previews').innerHTML = active.previewHtml ?? '';
+    $('filename').value = active.config.filename;
+  }
+  renderWorkspaceTabs();
+  message(
+    failures.length
+      ? `Saved ${saved.length}/${workspaces.length}. ${failures.join(' · ')}`
+      : `Saved all ${saved.length} workspace(s).${renamed.length ? ` Renamed collisions: ${renamed.join(', ')}.` : ''}`,
+    Boolean(failures.length),
+  );
 }
 
 async function closeWorkspace(identifier) {
@@ -245,6 +341,84 @@ async function updatePathSuggestions() {
 function schedulePathSuggestions() {
   clearTimeout(pathSuggestionTimer);
   pathSuggestionTimer = setTimeout(() => updatePathSuggestions().catch(() => {}), 150);
+}
+
+function renderOutputPathSuggestions(items, selected = 0) {
+  const root = $('output-dir-suggestions');
+  outputPathSuggestions = items;
+  outputPathSuggestionIndex = items.length ? Math.max(0, Math.min(selected, items.length - 1)) : -1;
+  root.innerHTML = items.map((item, index) => (
+    `<button type="button" class="path-suggestion ${index === outputPathSuggestionIndex ? 'active' : ''}" role="option" aria-selected="${index === outputPathSuggestionIndex}" data-index="${index}"><span>${escapeHtml(item.label)}</span><span class="path-suggestion-kind">${escapeHtml(item.kind)}</span></button>`
+  )).join('');
+  root.hidden = !items.length;
+  $('output-dir').setAttribute('aria-expanded', String(Boolean(items.length)));
+  root.querySelectorAll('.path-suggestion').forEach(button => {
+    button.onmousedown = event => {
+      event.preventDefault(); acceptOutputPathSuggestion(Number(button.dataset.index));
+    };
+  });
+}
+
+function selectOutputPathSuggestion(index) {
+  if (!outputPathSuggestions.length) return;
+  outputPathSuggestionIndex = (index + outputPathSuggestions.length) % outputPathSuggestions.length;
+  $('output-dir-suggestions').querySelectorAll('.path-suggestion').forEach((button, itemIndex) => {
+    const active = itemIndex === outputPathSuggestionIndex;
+    button.classList.toggle('active', active); button.setAttribute('aria-selected', String(active));
+    if (active) button.scrollIntoView({block: 'nearest'});
+  });
+}
+
+function acceptOutputPathSuggestion(index = outputPathSuggestionIndex) {
+  const item = outputPathSuggestions[index];
+  if (!item) return;
+  $('output-dir').value = item.value;
+  renderOutputPathSuggestions([]); $('output-dir').focus();
+  updateOutputPathSuggestions().catch(() => {});
+}
+
+async function updateOutputPathSuggestions() {
+  const value = $('output-dir').value;
+  const sequence = ++outputPathSuggestionSequence;
+  if (!value) {
+    renderOutputPathSuggestions([]); $('output-dir-resolved').textContent = ''; return;
+  }
+  const response = await apiFetch(`/api/path-suggestions?value=${encodeURIComponent(value)}`);
+  if (!response.ok) return;
+  const result = await response.json();
+  if (sequence !== outputPathSuggestionSequence || value !== $('output-dir').value) return;
+  renderOutputPathSuggestions((result.suggestions ?? []).filter(item => item.kind !== 'file'));
+  const resolved = $('output-dir-resolved');
+  resolved.textContent = result.error ? result.error : result.resolved_path ? `Resolved: ${result.resolved_path}` : '';
+  resolved.className = result.error ? 'path-resolution error' : 'path-resolution';
+}
+
+function scheduleOutputPathSuggestions() {
+  clearTimeout(outputPathSuggestionTimer);
+  outputPathSuggestionTimer = setTimeout(() => updateOutputPathSuggestions().catch(() => {}), 150);
+}
+
+async function browseServerConfigs(directory = null) {
+  const requested = directory ?? $('output-dir').value;
+  const response = await apiFetch(`/api/config-browser?directory=${encodeURIComponent(requested)}`);
+  if (!response.ok) return apiError(response);
+  const result = await response.json();
+  serverConfigDirectory = result.directory;
+  $('server-config-directory').textContent = result.exists
+    ? result.directory : `${result.directory} does not exist yet`;
+  $('server-config-up').dataset.path = result.parent;
+  $('server-config-files').innerHTML = (result.entries ?? []).length
+    ? result.entries.map(item => `<button type="button" class="server-config-entry" data-kind="${item.kind}" data-path="${escapeHtml(item.path)}"><span>${item.kind === 'directory' ? '📁' : 'JSON'}</span><span>${escapeHtml(item.name)}</span></button>`).join('')
+    : '<small>No JSON configurations or subdirectories found.</small>';
+  $('server-config-files').querySelectorAll('.server-config-entry').forEach(button => {
+    button.onclick = async () => {
+      if (button.dataset.kind === 'directory') return browseServerConfigs(button.dataset.path);
+      const fileResponse = await apiFetch(`/api/config-file?path=${encodeURIComponent(button.dataset.path)}`);
+      if (!fileResponse.ok) return apiError(fileResponse);
+      const loaded = await fileResponse.json();
+      await loadConfigurationObject(loaded.config, `Server configuration ${loaded.path}`);
+    };
+  });
 }
 
 async function updateSystemStats() {
@@ -393,6 +567,28 @@ function updateBrokenYAxisState() {
   $('broken-y-ranges').querySelectorAll('input,button').forEach(item => { item.disabled = !enabled; });
 }
 
+function clearSourceEditor() {
+  editingSourceName = null;
+  $('source-name').value = ''; $('source-path').value = '';
+  $('source-format').value = 'auto'; $('source-separator').value = '';
+  $('source-filter-expression').value = ''; $('source-options').value = '{}';
+  $('add-source').textContent = 'Add source'; $('cancel-source-edit').hidden = true;
+  renderPathSuggestions([]); $('source-path-resolved').textContent = '';
+}
+
+function editSource(item) {
+  const options = structuredClone(item.options ?? {});
+  const separator = options.separator ?? '';
+  delete options.separator;
+  editingSourceName = item.name;
+  $('source-name').value = item.name; $('source-path').value = item.path;
+  $('source-format').value = item.format ?? 'auto'; $('source-separator').value = separator;
+  $('source-filter-expression').value = item.filter_expression ?? '';
+  $('source-options').value = JSON.stringify(options, null, 2);
+  $('add-source').textContent = 'Update source'; $('cancel-source-edit').hidden = false;
+  schedulePathSuggestions(); $('source-name').focus();
+}
+
 function renderSources() {
   $('sources').innerHTML = '';
   $('source-count').textContent = `${bootstrap.sources.length} registered`;
@@ -403,8 +599,9 @@ function renderSources() {
       ? `<small>Resolved</small><code>${escapeHtml(item.resolved_path)}</code>` : '';
     const sourceFilter = item.filter_expression
       ? `<small>Global filter</small><code>${escapeHtml(item.filter_expression)}</code>` : '';
-    div.innerHTML = `<div class="source-head"><strong>${escapeHtml(item.name)}</strong><button class="remove">Remove</button></div><small>${escapeHtml(item.format)} · ${item.columns.length} columns</small><code>${escapeHtml(item.path)}</code>${resolved}${sourceFilter}`;
-    div.querySelector('button').onclick = async () => {
+    div.innerHTML = `<div class="source-head"><strong>${escapeHtml(item.name)}</strong><span><button class="edit" type="button">Edit</button><button class="remove" type="button">Remove</button></span></div><small>${escapeHtml(item.format)} · ${item.columns.length} columns</small><code>${escapeHtml(item.path)}</code>${resolved}${sourceFilter}`;
+    div.querySelector('.edit').onclick = () => editSource(item);
+    div.querySelector('.remove').onclick = async () => {
       const workspaceId = activeWorkspaceId;
       const currentWorkspace = workspaceById(workspaceId);
       if (currentWorkspace) currentWorkspace.config = collect();
@@ -414,6 +611,7 @@ function renderSources() {
       if (!workspace) return;
       workspace.bootstrap.sources = workspace.bootstrap.sources.filter(x => x.name !== item.name);
       workspace.config.layers = workspace.config.layers.filter(x => x.source !== item.name);
+      if (editingSourceName === item.name) clearSourceEditor();
       if (workspaceId !== activeWorkspaceId) return;
       bootstrap = workspace.bootstrap; config = workspace.config;
       reconcileStages(); renderSources(); renderLayers(); renderStages(); changed(true);
@@ -589,7 +787,7 @@ function renderLayers() {
     const groupingText = grouping === 'group_by_dynamic' ? 'group_by_dynamic bins the Time/X column by Every; the function aggregates Y values in each time bin.' : grouping === 'group_by' ? 'group_by uses each distinct X value as a group; the function aggregates Y values within that group.' : 'None plots row-level X and Y values without aggregation.';
     const aggregations = bootstrap.registry.aggregations.filter(value => value !== 'none');
     const groupingOptions = `<option value="none" ${grouping === 'none' ? 'selected' : ''}>none (raw rows)</option><option value="group_by" ${grouping === 'group_by' ? 'selected' : ''}>group_by</option><option value="group_by_dynamic" ${grouping === 'group_by_dynamic' ? 'selected' : ''}>group_by_dynamic</option>`;
-    card.innerHTML = `<div class="layer-head"><input class="enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}><input class="label" value="${escapeHtml(layer.label)}"><button class="remove">×</button></div><div class="grid plot-basics"><label>Source<select class="source-select">${option(names, layer.source)}</select></label><label>Plot type<select class="plot-type">${option(bootstrap.registry.plot_types, layer.plot_type)}</select></label><label>Color${colorPalette(selectedColor)}</label></div><div class="grid axis-columns"><label><span>${xLabel} ${info('X supplies the horizontal values. With group_by it is the grouping key; with group_by_dynamic it must be a Date or Datetime column.')}</span><select class="x-column">${option(cols, layer.x_column, true)}</select></label><label><span>Y/value column ${info('The selected aggregation function is applied to this column. count and relative_count count rows and therefore ignore Y.')}</span><select class="y-column">${option(cols, layer.y_column, true)}</select></label></div><div class="grouping-panel"><div class="grid grouping-grid"><label><span>Grouping method ${info('none plots raw rows; group_by combines equal X values; group_by_dynamic creates regular time bins from the Time/X column.')}</span><select class="grouping-method">${groupingOptions}</select></label><label class="time-every" ${grouping === 'group_by_dynamic' ? '' : 'hidden'}><span>Every ${info('Width of each time bin, for example 1s, 1m, 5m, 1h, 1d, 1w, or 1mo.')}</span><input class="time-bin" list="time-bins" placeholder="1m" value="${escapeHtml(layer.time_bin ?? '1m')}"></label><label class="time-start-by" ${grouping === 'group_by_dynamic' ? '' : 'hidden'}><span>Week starts on ${info('Anchor weekday for weekly bins. Monday is the default; choose Thursday to match start_by=\'thursday\' in Polars.')}</span><select class="time-bin-start-by">${option(WEEKDAYS, layer.time_bin_start_by)}</select></label><label><span>Aggregate Y with ${info('The function is applied to Y inside every X group or time bin. count and relative_count operate on rows instead.')}</span><select class="aggregation" ${grouping === 'none' ? 'disabled' : ''}>${option(aggregations, layer.aggregation === 'none' ? 'sum' : layer.aggregation)}</select></label></div><small>${groupingText}</small></div><div class="grid"><label><span>Split series by / color ${info('Optional categorical column. Each distinct value becomes a separate plotted series and legend entry; when aggregating, it is an additional grouping key.')}</span><select class="group-column">${option(cols, layer.group_column, true)}</select></label><label>Sort<select class="sort">${option(['none', 'x_ascending', 'x_descending', 'y_ascending', 'y_descending'], layer.sort)}</select></label><label>Input row limit<input class="limit" type="number" min="1" value="${layer.limit ?? ''}"></label><label><span>Result limit ${info('Applied after filtering, aggregation, and sorting. Use this for ranked top-N plots; Input row limit instead bounds raw data loading.')}</span><input class="result-limit" type="number" min="1" value="${layer.result_limit ?? ''}"></label><label>Result Y min<input class="result-y-min" type="number" step="any" value="${layer.result_y_min ?? ''}"></label><label>Result Y max<input class="result-y-max" type="number" step="any" value="${layer.result_y_max ?? ''}"></label><label>Opacity<input class="alpha" type="number" min="0" max="1" step="0.05" value="${layer.style.alpha ?? 1}"></label><label>Marker<select class="marker">${option(['none', 'o', 's', '^', 'v', 'D', 'x', '+', '*'], layer.style.marker ?? 'none')}</select></label><label>Line width<input class="linewidth" type="number" step=".1" value="${layer.style.linewidth ?? 1.5}"></label></div><div class="checks"><label><input class="stacked" type="checkbox" ${layer.stacked ? 'checked' : ''}> Stacked</label><label><input class="secondary" type="checkbox" ${layer.secondary_y ? 'checked' : ''}> Secondary y</label><label><input class="fix-x-values" type="checkbox" ${layer.fix_x_values ? 'checked' : ''}> Fix shared X values from this layer ${info('This layer defines the ordered X domain after its filters, aggregation, sorting, and result limit. Every other layer is filtered and aligned to that domain.')}</label></div><label><span>Aggregation options (JSON) ${info('quantile, relative_count, and relative_value accept built-in options. See the examples below and the README for the complete list.')}</span><textarea class="aggregation-options">${escapeHtml(JSON.stringify(layer.aggregation_options))}</textarea></label><small>Examples: {"quantile":0.95}; {"scale":"percent"} for relative_count; or {"denominator":"total","scale":"percent"} for relative_value.</small><label><span>Plot options (JSON) ${info('Renderer-specific settings. Styling such as color, opacity, marker, and line width uses the controls above.')}</span><textarea class="plot-options">${escapeHtml(JSON.stringify(layer.options))}</textarea></label><small>Examples: histogram {"bins":50,"density":true}; step {"where":"pre"}; hexbin {"gridsize":40}.</small><div class="filter-editor"><div class="filter-editor-head"><strong>Filters</strong>${info('Structured filters and the layer expression use Root match. When set, the base expression is required and is applied before a relative_count denominator is calculated.') }<label>Root match<select class="filter-logic">${option(['and', 'or'], layer.filter_logic)}</select></label><button class="add-filter" type="button">+ condition</button><button class="add-filter-group" type="button">+ nested group</button></div><label>Layer base Polars expression<input class="base-filter-expression" list="expression-symbols" value="${escapeHtml(layer.base_filter_expression)}" placeholder="const.IS_SYN"><small>Defines base rows for this layer and is included in the relative_count denominator.</small></label><label>Layer Polars expression<input class="filter-expression" list="expression-symbols" value="${escapeHtml(layer.filter_expression)}" placeholder="pl.col('is_irregular_syn')"><small>Combined with the structured filters using Root match; affects the numerator/plotted rows.</small></label><div class="filters"></div></div>`;
+    card.innerHTML = `<div class="layer-head"><input class="enabled" type="checkbox" ${layer.enabled ? 'checked' : ''}><input class="label" value="${escapeHtml(layer.label)}"><button class="duplicate" type="button">Duplicate</button><button class="remove">×</button></div><div class="grid plot-basics"><label>Source<select class="source-select">${option(names, layer.source)}</select></label><label>Plot type<select class="plot-type">${option(bootstrap.registry.plot_types, layer.plot_type)}</select></label><label>Color${colorPalette(selectedColor)}</label></div><div class="grid axis-columns"><label><span>${xLabel} ${info('X supplies the horizontal values. With group_by it is the grouping key; with group_by_dynamic it must be a Date or Datetime column.')}</span><select class="x-column">${option(cols, layer.x_column, true)}</select></label><label><span>Y/value column ${info('The selected aggregation function is applied to this column. count and relative_count count rows and therefore ignore Y.')}</span><select class="y-column">${option(cols, layer.y_column, true)}</select></label></div><div class="grouping-panel"><div class="grid grouping-grid"><label><span>Grouping method ${info('none plots raw rows; group_by combines equal X values; group_by_dynamic creates regular time bins from the Time/X column.')}</span><select class="grouping-method">${groupingOptions}</select></label><label class="time-every" ${grouping === 'group_by_dynamic' ? '' : 'hidden'}><span>Every ${info('Width of each time bin, for example 1s, 1m, 5m, 1h, 1d, 1w, or 1mo.')}</span><input class="time-bin" list="time-bins" placeholder="1m" value="${escapeHtml(layer.time_bin ?? '1m')}"></label><label class="time-start-by" ${grouping === 'group_by_dynamic' ? '' : 'hidden'}><span>Week starts on ${info('Anchor weekday for weekly bins. Monday is the default; choose Thursday to match start_by=\'thursday\' in Polars.')}</span><select class="time-bin-start-by">${option(WEEKDAYS, layer.time_bin_start_by)}</select></label><label><span>Aggregate Y with ${info('The function is applied to Y inside every X group or time bin. count and relative_count operate on rows instead.')}</span><select class="aggregation" ${grouping === 'none' ? 'disabled' : ''}>${option(aggregations, layer.aggregation === 'none' ? 'sum' : layer.aggregation)}</select></label></div><small>${groupingText}</small></div><div class="grid"><label><span>Split series by / color ${info('Optional categorical column. Each distinct value becomes a separate plotted series and legend entry; when aggregating, it is an additional grouping key.')}</span><select class="group-column">${option(cols, layer.group_column, true)}</select></label><label>Sort<select class="sort">${option(['none', 'x_ascending', 'x_descending', 'y_ascending', 'y_descending'], layer.sort)}</select></label><label>Input row limit<input class="limit" type="number" min="1" value="${layer.limit ?? ''}"></label><label><span>Result limit ${info('Applied after filtering, aggregation, and sorting. Use this for ranked top-N plots; Input row limit instead bounds raw data loading.')}</span><input class="result-limit" type="number" min="1" value="${layer.result_limit ?? ''}"></label><label>Result Y min<input class="result-y-min" type="number" step="any" value="${layer.result_y_min ?? ''}"></label><label>Result Y max<input class="result-y-max" type="number" step="any" value="${layer.result_y_max ?? ''}"></label><label>Opacity<input class="alpha" type="number" min="0" max="1" step="0.05" value="${layer.style.alpha ?? 1}"></label><label>Marker<select class="marker">${option(['none', 'o', 's', '^', 'v', 'D', 'x', '+', '*'], layer.style.marker ?? 'none')}</select></label><label>Line width<input class="linewidth" type="number" step=".1" value="${layer.style.linewidth ?? 1.5}"></label></div><div class="checks"><label><input class="stacked" type="checkbox" ${layer.stacked ? 'checked' : ''}> Stacked</label><label><input class="secondary" type="checkbox" ${layer.secondary_y ? 'checked' : ''}> Secondary y</label><label><input class="fix-x-values" type="checkbox" ${layer.fix_x_values ? 'checked' : ''}> Fix shared X values from this layer ${info('This layer defines the ordered X domain after its filters, aggregation, sorting, and result limit. Every other layer is filtered and aligned to that domain.')}</label></div><label><span>Aggregation options (JSON) ${info('quantile, relative_count, and relative_value accept built-in options. See the examples below and the README for the complete list.')}</span><textarea class="aggregation-options">${escapeHtml(JSON.stringify(layer.aggregation_options))}</textarea></label><small>Examples: {"quantile":0.95}; {"scale":"percent"} for relative_count; or {"denominator":"total","scale":"percent"} for relative_value.</small><label><span>Plot options (JSON) ${info('Renderer-specific settings. Styling such as color, opacity, marker, and line width uses the controls above.')}</span><textarea class="plot-options">${escapeHtml(JSON.stringify(layer.options))}</textarea></label><small>Examples: histogram {"bins":50,"density":true}; step {"where":"pre"}; hexbin {"gridsize":40}.</small><div class="filter-editor"><div class="filter-editor-head"><strong>Filters</strong>${info('Structured filters and the layer expression use Root match. When set, the base expression is required and is applied before a relative_count denominator is calculated.') }<label>Root match<select class="filter-logic">${option(['and', 'or'], layer.filter_logic)}</select></label><button class="add-filter" type="button">+ condition</button><button class="add-filter-group" type="button">+ nested group</button></div><label>Layer base Polars expression<input class="base-filter-expression" list="expression-symbols" value="${escapeHtml(layer.base_filter_expression)}" placeholder="const.IS_SYN"><small>Defines base rows for this layer and is included in the relative_count denominator.</small></label><label>Layer Polars expression<input class="filter-expression" list="expression-symbols" value="${escapeHtml(layer.filter_expression)}" placeholder="pl.col('is_irregular_syn')"><small>Combined with the structured filters using Root match; affects the numerator/plotted rows.</small></label><div class="filters"></div></div>`;
     const groupLabel = card.querySelector('.group-column').closest('label');
     card.querySelector('.grouping-grid').appendChild(groupLabel);
     const groupingPanel = card.querySelector('.grouping-panel');
@@ -623,6 +821,14 @@ function renderLayers() {
     const q = selector => card.querySelector(selector);
     q('.enabled').onchange = event => { layer.enabled = event.target.checked; renderStages(); changed(true); };
     q('.label').oninput = event => { layer.label = event.target.value; changed(false); };
+    q('.duplicate').onclick = () => {
+      const duplicate = structuredClone(layer);
+      duplicate.id = `layer-${Date.now()}-${config.layers.length}`;
+      duplicate.label = `${layer.label} copy`;
+      duplicate.fix_x_values = false;
+      config.layers.splice(index + 1, 0, duplicate);
+      renderLayers(); renderStages(); changed(true);
+    };
     q('.remove').onclick = () => { config.layers.splice(index, 1); reconcileStages(); renderLayers(); renderStages(); changed(false); };
     q('.source-select').onchange = event => {
       layer.source = event.target.value; layer.x_column = ''; layer.y_column = '';
@@ -827,6 +1033,7 @@ function collect() {
   const result = structuredClone(config);
   result.config_module = $('config-module').value.trim() || null;
   result.sources = bootstrap.sources.map(({name, path, format, options, filter_expression}) => ({name, path, format, options, filter_expression: filter_expression ?? null}));
+  result.output_dir = $('output-dir').value.trim();
   result.filename = $('filename').value;
   result.figure = {width: Number($('width').value), height: Number($('height').value), dpi: 150, font_family: $('mono').checked ? 'monospace' : 'default', font_size: Number($('font-size').value)};
   result.axes = {
@@ -896,6 +1103,10 @@ function apply(next) {
   queryRevision += 1; queryDirty = true;
   config = structuredClone(next); ensureConfig();
   $('config-module').value = config.config_module ?? bootstrap.config_module ?? '';
+  $('output-dir').value = config.output_dir ?? bootstrap.output_dir ?? 'plots';
+  renderOutputPathSuggestions([]); $('output-dir-resolved').textContent = '';
+  serverConfigDirectory = null; $('server-config-directory').textContent = '';
+  $('server-config-files').innerHTML = '';
   $('filename').value = config.filename ?? 'explorative-plot';
   $('width').value = config.figure.width ?? 5.6; $('height').value = config.figure.height ?? 2.8;
   $('font-size').value = config.figure.font_size ?? 12; $('mono').checked = config.figure.font_family === 'monospace';
@@ -993,7 +1204,7 @@ async function applyConfigModule(showMessage = true) {
   if (workspaceId !== activeWorkspaceId) return false;
   bootstrap = workspace.bootstrap; config = workspace.config; renderExpressionSymbols();
   queryRevision += 1; queryDirty = true; clearTimeout(liveTimer);
-  renderSources(); renderLayers(); schedulePathSuggestions();
+  renderSources(); renderLayers(); schedulePathSuggestions(); scheduleOutputPathSuggestions();
   if (showMessage) message(`Config module applied: ${result.config_module ?? '(none)'}.`);
   return true;
 }
@@ -1066,6 +1277,8 @@ function bindPresentationControls() {
 
 $('apply-config-module').onclick = () => applyConfigModule();
 $('add-workspace').onclick = () => addWorkspace();
+$('duplicate-workspace').onclick = () => duplicateWorkspace();
+$('save-all-workspaces').onclick = () => saveAllWorkspaces();
 $('source-path').oninput = schedulePathSuggestions;
 $('source-path').onfocus = schedulePathSuggestions;
 $('source-path').onkeydown = event => {
@@ -1083,25 +1296,54 @@ $('source-path').onkeydown = event => {
   }
 };
 $('source-path').onblur = () => setTimeout(() => renderPathSuggestions([]), 120);
+$('output-dir').oninput = scheduleOutputPathSuggestions;
+$('output-dir').onfocus = scheduleOutputPathSuggestions;
+$('output-dir').onkeydown = event => {
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    if (!outputPathSuggestions.length) return;
+    event.preventDefault();
+    selectOutputPathSuggestion(outputPathSuggestionIndex + (event.key === 'ArrowDown' ? 1 : -1));
+  } else if (event.key === 'Tab') {
+    event.preventDefault(); clearTimeout(outputPathSuggestionTimer);
+    updateOutputPathSuggestions().then(() => acceptOutputPathSuggestion()).catch(() => {});
+  } else if (event.key === 'Enter' && outputPathSuggestions.length) {
+    event.preventDefault(); acceptOutputPathSuggestion();
+  } else if (event.key === 'Escape') {
+    renderOutputPathSuggestions([]);
+  }
+};
+$('output-dir').onblur = () => setTimeout(() => renderOutputPathSuggestions([]), 120);
+$('server-config-browser').ontoggle = event => {
+  if (event.currentTarget.open) browseServerConfigs().catch(error => message(error.message, true));
+};
+$('refresh-server-configs').onclick = () => browseServerConfigs(serverConfigDirectory ?? $('output-dir').value);
+$('server-config-up').onclick = event => browseServerConfigs(event.currentTarget.dataset.path || $('output-dir').value);
 $('show-system-stats').onchange = event => setSystemStatsEnabled(event.target.checked);
+$('cancel-source-edit').onclick = clearSourceEditor;
 $('add-source').onclick = async () => {
   const workspaceId = activeWorkspaceId;
   if (!await applyConfigModule(false)) return;
   if (workspaceId !== activeWorkspaceId) return;
+  const currentWorkspace = workspaceById(workspaceId);
+  if (currentWorkspace) currentWorkspace.config = collect();
   const submitted = {name: $('source-name').value, path: $('source-path').value, format: $('source-format').value, separator: $('source-separator').value, filterExpression: $('source-filter-expression').value, optionsText: $('source-options').value};
   let options; try { options = JSON.parse(submitted.optionsText || '{}'); } catch { return message('Invalid source options JSON', true); }
-  message(`Inferring ${submitted.name || 'source'} schema from the first 100 rows in the background…`);
-  const response = await apiFetch('/api/sources', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: submitted.name, path: submitted.path, format: submitted.format, separator: submitted.separator, filter_expression: submitted.filterExpression, options})}, workspaceId);
+  const previousName = editingSourceName;
+  message(`${previousName ? 'Updating' : 'Inferring'} ${submitted.name || 'source'} schema from the first 100 rows in the background…`);
+  const endpoint = previousName ? `/api/sources/${encodeURIComponent(previousName)}` : '/api/sources';
+  const response = await apiFetch(endpoint, {method: previousName ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: submitted.name, path: submitted.path, format: submitted.format, separator: submitted.separator, filter_expression: submitted.filterExpression, options})}, workspaceId);
   if (!response.ok) return apiError(response, workspaceId);
   const added = await response.json(); const workspace = workspaceById(workspaceId);
   if (!workspace) return;
-  workspace.bootstrap.sources = workspace.bootstrap.sources.filter(item => item.name !== added.name); workspace.bootstrap.sources.push(added);
+  workspace.bootstrap.sources = workspace.bootstrap.sources.filter(item => item.name !== added.name && item.name !== previousName); workspace.bootstrap.sources.push(added);
+  if (previousName && previousName !== added.name) {
+    workspace.config.layers.forEach(layer => { if (layer.source === previousName) layer.source = added.name; });
+  }
   workspace.queryDirty = true;
   if (workspaceId !== activeWorkspaceId) return;
   bootstrap = workspace.bootstrap;
-  $('source-name').value = ''; $('source-path').value = ''; $('source-format').value = 'auto'; $('source-separator').value = ''; $('source-filter-expression').value = ''; $('source-options').value = '{}';
-  renderPathSuggestions([]); $('source-path-resolved').textContent = '';
-  renderSources(); renderLayers(); message('Lazy source registered.');
+  config = workspace.config; clearSourceEditor();
+  renderSources(); renderLayers(); message(previousName ? 'Source updated.' : 'Lazy source registered.');
 };
 $('add-layer').onclick = () => { config.layers.push(newLayer()); renderLayers(); renderStages(); changed(true); };
 $('add-annotation').onclick = () => { config.annotations.push(newAnnotation()); renderAnnotations(); renderStages(); changed(false); };
@@ -1124,13 +1366,11 @@ $('add-stage').onclick = () => {
 $('render').onclick = () => post('/api/render'); $('save').onclick = () => post('/api/save');
 $('download').onclick = () => post('/api/download', true); $('export-code').onclick = () => post('/api/export-code', true);
 $('clear-cache').onclick = async () => { await apiFetch('/api/cache/clear', {method: 'POST'}); message('Cache cleared.'); };
-$('load-config').onchange = async event => {
+async function loadConfigurationObject(loaded, description = 'Configuration') {
   const workspaceId = activeWorkspaceId;
   const workspace = workspaceById(workspaceId);
   if (!workspace) return;
   const targetBootstrap = workspace.bootstrap;
-  let loaded; try { loaded = JSON.parse(await event.target.files[0].text()); }
-  catch (error) { return message(`Invalid configuration: ${error.message}`, true); }
   const migrationResponse = await apiFetch('/api/migrate-config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(loaded)}, workspaceId);
   if (!migrationResponse.ok) return apiError(migrationResponse, workspaceId);
   const migration = await migrationResponse.json(); loaded = migration.config;
@@ -1189,12 +1429,22 @@ $('load-config').onchange = async event => {
     }
     return true;
   });
-  workspace.config = loaded; workspace.queryDirty = true;
-  workspace.message = {text: issues.length ? `Configuration loaded with issues: ${issues.join(' · ')}` : 'Configuration loaded.', error: Boolean(issues.length)};
+  loaded.output_dir ??= config?.output_dir ?? targetBootstrap.output_dir ?? 'plots';
+  workspace.config = loaded; workspace.sourceDraft = {}; workspace.queryDirty = true;
+  workspace.message = {text: issues.length ? `${description} loaded with issues: ${issues.join(' · ')}` : `${description} loaded.`, error: Boolean(issues.length)};
   if (workspaceId === activeWorkspaceId) {
-    bootstrap = targetBootstrap; renderExpressionSymbols(); renderSources(); apply(loaded);
+    bootstrap = targetBootstrap; clearSourceEditor(); renderExpressionSymbols(); renderSources(); apply(loaded);
     message(workspace.message.text, workspace.message.error); renderWorkspaceTabs();
   }
+}
+
+$('load-config').onchange = async event => {
+  if (!event.target.files?.length) return;
+  let loaded;
+  try { loaded = JSON.parse(await event.target.files[0].text()); }
+  catch (error) { return message(`Invalid configuration: ${error.message}`, true); }
+  await loadConfigurationObject(loaded);
+  event.target.value = '';
 };
 
 bindPresentationControls();

@@ -221,6 +221,29 @@ class DataCatalog:
             self._schemas[spec.name] = schema
         return self.metadata(spec.name)
 
+    def update(self, current_name: str, spec: SourceSpec) -> dict[str, Any]:
+        """Validate and atomically replace an existing source, including renames."""
+        self._validate_spec(spec)
+        self._validate_path(spec.path)
+        with self._lock:
+            if current_name not in self._sources:
+                raise ConfigurationError(f"unknown source: {current_name}")
+            if spec.name != current_name and spec.name in self._sources:
+                raise ConfigurationError(f"source already exists: {spec.name}")
+            module = self._config_module
+            module_name = self._config_module_name
+        schema = self._infer_schema(spec, module, module_name)
+        with self._lock:
+            if current_name not in self._sources:
+                raise ConfigurationError(f"unknown source: {current_name}")
+            if spec.name != current_name and spec.name in self._sources:
+                raise ConfigurationError(f"source already exists: {spec.name}")
+            del self._sources[current_name]
+            self._schemas.pop(current_name, None)
+            self._sources[spec.name] = spec
+            self._schemas[spec.name] = schema
+        return self.metadata(spec.name)
+
     def remove(self, name: str) -> None:
         with self._lock:
             if name not in self._sources:

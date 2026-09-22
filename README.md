@@ -140,6 +140,9 @@ While a source path is being typed, the browser shows its live resolved value
 and offers completions for `${...}` variables from the applied config module as
 well as matching directories and files. Press **Tab** to accept the highlighted
 completion, use the arrow keys to select another match, or click a suggestion.
+Registered sources have an **Edit** action. Updating a source re-infers its
+schema atomically; renaming it also updates every layer that referred to the old
+name.
 
 The **Show RAM/CPU** checkbox in the page header enables a bottom-right system
 usage display. It reads lightweight host CPU and memory counters every ten
@@ -160,6 +163,11 @@ content-addressed and shared between workspaces, so identical queries can still
 reuse cached results without sharing editable state. Workspace tabs last for the
 current page session; downloaded JSON configurations remain the persistent way
 to save an exploration across application restarts.
+**Duplicate workspace** clones the active tab, including its catalog, source
+editor draft, plot configuration, and preview. Individual plot layers also have
+a **Duplicate** action that copies their query, filters, and styling. **Save
+all** renders and saves every open workspace to its own configured output
+directory.
 
 ## Query and plot model
 
@@ -491,9 +499,15 @@ export currently requires stages to be disabled; use **Download** to retrieve
 all staged PNG/PDF files in one archive.
 
 PNG and PDF plots and the complete JSON configuration can be downloaded or
-saved to the configured output directory. The JSON includes source paths and
+saved to the workspace's **Output directory**. That field provides the same
+filesystem and `${VARIABLE}` completion as source paths, and its raw template
+is retained in the JSON configuration. The JSON includes source paths and
 reader settings. Loading it in the browser restores the plot and atomically
 replaces the active source catalog with the saved one.
+Configurations can be loaded either from a JSON file on the browser's computer
+or from **Browse configurations on server**. The server browser starts in the
+current output directory, lists subdirectories and JSON files, and allows
+navigation before loading a selection.
 
 ### Former-schema configurations
 

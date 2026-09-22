@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 import re
@@ -76,6 +77,20 @@ class ApplicationState:
             raise ConfigurationError("invalid workspace id")
         with self._workspace_lock:
             return self._workspaces.pop(identifier, None) is not None
+
+    def clone_workspace(self, source_identifier: str | None, target_identifier: str) -> None:
+        source_name = str(source_identifier or "default").strip()
+        if WORKSPACE_ID.fullmatch(source_name) is None:
+            raise ConfigurationError("invalid source workspace id")
+        if WORKSPACE_ID.fullmatch(target_identifier) is None:
+            raise ConfigurationError("invalid target workspace id")
+        source = self.workspace(source_name)
+        with self._workspace_lock:
+            if target_identifier in self._workspaces:
+                raise ConfigurationError("target workspace already exists")
+            self._workspaces[target_identifier] = WorkspaceState(
+                source.catalog.clone(), self.registry, self.cache
+            )
 
 
 class SystemMetrics:
@@ -230,13 +245,15 @@ def create_app(state: ApplicationState) -> Flask:
     @app.get("/api/bootstrap")
     def bootstrap():
         workspace = current_workspace()
+        initial_config = default_config(workspace.catalog.config_module)
+        initial_config["output_dir"] = str(state.output_dir)
         return jsonify(
             {
                 "sources": workspace.catalog.all_metadata(),
                 "registry": state.registry.metadata(),
                 "config_module": workspace.catalog.config_module,
                 "expression_variables": workspace.catalog.expression_variables(),
-                "default_config": default_config(workspace.catalog.config_module),
+                "default_config": initial_config,
                 "output_dir": str(state.output_dir),
             }
         )
@@ -245,12 +262,73 @@ def create_app(state: ApplicationState) -> Flask:
     def delete_workspace(identifier: str):
         return jsonify({"removed": state.remove_workspace(identifier)})
 
+    @app.post("/api/workspaces/<identifier>/clone")
+    def clone_workspace(identifier: str):
+        state.clone_workspace(request.headers.get("X-ELP-Workspace"), identifier)
+        return jsonify({"workspace": identifier}), 201
+
     @app.get("/api/path-suggestions")
     def path_suggestions():
         value = request.args.get("value", "")
         if len(value) > 4096:
-            raise ConfigurationError("source path is too long")
+            raise ConfigurationError("path is too long")
         return jsonify(current_workspace().catalog.complete_path(value))
+
+    def resolved_path(value: str, workspace: WorkspaceState) -> Path:
+        if len(value) > 4096:
+            raise ConfigurationError("path is too long")
+        return Path(workspace.catalog.resolve_path(value)).expanduser().resolve()
+
+    @app.get("/api/config-browser")
+    def config_browser():
+        workspace = current_workspace()
+        raw_directory = str(request.args.get("directory") or state.output_dir)
+        directory = resolved_path(raw_directory, workspace)
+        if directory.exists() and not directory.is_dir():
+            raise ConfigurationError(f"configuration browser path is not a directory: {directory}")
+        entries = []
+        if directory.is_dir():
+            try:
+                children = sorted(
+                    directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold())
+                )
+            except OSError as error:
+                raise ConfigurationError(
+                    f"cannot browse configuration directory {directory}: {error}"
+                ) from error
+            for item in children:
+                if item.is_dir() or (item.is_file() and item.suffix.lower() == ".json"):
+                    entries.append(
+                        {
+                            "name": item.name,
+                            "path": str(item),
+                            "kind": "directory" if item.is_dir() else "config",
+                        }
+                    )
+                if len(entries) >= 500:
+                    break
+        return jsonify(
+            {
+                "directory": str(directory),
+                "parent": str(directory.parent),
+                "exists": directory.is_dir(),
+                "entries": entries,
+            }
+        )
+
+    @app.get("/api/config-file")
+    def config_file():
+        workspace = current_workspace()
+        path = resolved_path(str(request.args.get("path") or ""), workspace)
+        if path.suffix.lower() != ".json" or not path.is_file():
+            raise ConfigurationError(f"configuration file does not exist: {path}")
+        if path.stat().st_size > 10 * 1024 * 1024:
+            raise ConfigurationError("configuration file must not exceed 10 MiB")
+        try:
+            config = json.loads(path.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ConfigurationError(f"cannot read configuration {path}: {error}") from error
+        return jsonify({"path": str(path), "config": config})
 
     @app.get("/api/system-stats")
     def system_stats():
@@ -294,6 +372,14 @@ def create_app(state: ApplicationState) -> Flask:
         )
         log(f"Registered lazy source {metadata['name']}: {metadata['path']}")
         return jsonify(metadata), 201
+
+    @app.put("/api/sources/<name>")
+    def update_source(name: str):
+        metadata = current_workspace().catalog.update(
+            name, _source_spec(request.get_json(silent=False))
+        )
+        log(f"Updated lazy source {name} as {metadata['name']}: {metadata['path']}")
+        return jsonify(metadata)
 
     @app.delete("/api/sources/<name>")
     def remove_source(name: str):
@@ -377,9 +463,11 @@ def create_app(state: ApplicationState) -> Flask:
 
     @app.post("/api/save")
     def save():
+        workspace = current_workspace()
         config, (artifacts, cache_states) = render()
-        files = _save(state.output_dir, artifacts)
-        log(f"Saved {len(files)} artifact(s) under {state.output_dir}")
+        output_dir = resolved_path(config["output_dir"], workspace)
+        files = _save(output_dir, artifacts)
+        log(f"Saved {len(files)} artifact(s) under {output_dir}")
         return jsonify(
             {
                 "files": files,

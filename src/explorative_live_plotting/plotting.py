@@ -48,6 +48,7 @@ def default_config(config_module: str | None = None) -> dict[str, Any]:
     return {
         "schema_version": 2,
         "config_module": config_module,
+        "output_dir": "plots",
         "filename": "explorative-plot",
         "sources": [],
         "figure": {
@@ -575,6 +576,7 @@ def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
             key: raw[key]
             for key in (
                 "config_module",
+                "output_dir",
                 "filename",
                 "sources",
                 "layers",
@@ -589,6 +591,12 @@ def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
     if module is not None and not isinstance(module, str):
         raise ConfigurationError("config_module must be a string or null")
     config["config_module"] = str(module or "").strip() or None
+    output_dir = config.get("output_dir")
+    if not isinstance(output_dir, str) or not output_dir.strip():
+        raise ConfigurationError("output directory must be a non-empty path string")
+    if len(output_dir) > 4096:
+        raise ConfigurationError("output directory is too long")
+    config["output_dir"] = output_dir.strip()
     if SAFE_FILENAME.fullmatch(str(config["filename"])) is None:
         raise ConfigurationError("filename must be a safe basename")
     figure = config["figure"]
