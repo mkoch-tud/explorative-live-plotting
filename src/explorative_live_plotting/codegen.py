@@ -364,7 +364,8 @@ def _annotation_code(item: dict[str, Any], axis: str = "primary") -> str:
         ) + label_code
     if kind == "hline":
         return (
-            f"        {axis}.axhline({item['y']!r}, color={color!r}, alpha={alpha!r}, "
+            f"        {axis}.axhline(_annotation_x({item['y']!r}), "
+            f"color={color!r}, alpha={alpha!r}, "
             f"linestyle={item.get('linestyle', '--')!r}, "
             f"linewidth={float(item.get('linewidth', 1.0))!r}, label={label!r})"
         ) + label_code
@@ -376,16 +377,18 @@ def _annotation_code(item: dict[str, Any], axis: str = "primary") -> str:
         ) + label_code
     if kind == "hspan":
         return (
-            f"        {axis}.axhspan({item['y1']!r}, {item['y2']!r}, "
+            f"        {axis}.axhspan(_annotation_x({item['y1']!r}), "
+            f"_annotation_x({item['y2']!r}), "
             f"facecolor={color!r}, edgecolor='none', alpha={alpha!r}, label={label!r})"
         ) + label_code
     if kind == "text":
         code = (
-            f"        if _annotation_y_visible({axis}, {item['y']!r}):\n"
+            f"        if _annotation_y_visible({axis}, _annotation_x({item['y']!r})):\n"
             f"            _foreground_text({axis}, _annotation_x({item['x']!r}), "
-            f"{item['y']!r}, {text!r}, "
+            f"_annotation_x({item['y']!r}), {text!r}, "
             f"color={item.get('text_color', color)!r}, "
             f"alpha={alpha!r}, fontsize={float(item.get('fontsize', 10))!r}, "
+            f"rotation={float(item.get('rotation', 0))!r}, "
             f"bbox=_annotation_bbox({item!r}))"
         )
         if item.get("show_in_legend", False):
@@ -606,7 +609,7 @@ def _foreground_text(
 def _annotation_y_visible(ax, y):
     try:
         lower, upper = sorted(ax.get_ylim())
-        return lower <= float(y) <= upper
+        return lower <= float(ax.convert_yunits(y)) <= upper
     except (TypeError, ValueError):
         return True
 
@@ -624,7 +627,7 @@ def _annotation_label(ax, item):
         _foreground_text(
             ax,
             _annotation_x(item.get("text_x", item.get("x", item.get("x1")))),
-            item["text_y"], text, color=color, alpha=alpha, fontsize=fontsize,
+            _annotation_x(item["text_y"]), text, color=color, alpha=alpha, fontsize=fontsize,
             horizontalalignment=item.get("text_horizontal_alignment", "left"),
             verticalalignment=item.get("text_vertical_alignment", "center"),
             bbox=_annotation_bbox(item),
@@ -647,6 +650,7 @@ def _annotation_label(ax, item):
         )
     else:
         y = item["y"] if kind == "hline" else item["y2"]
+        y = _annotation_x(y)
         if not _annotation_y_visible(ax, y):
             return
         _foreground_text(

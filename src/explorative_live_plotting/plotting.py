@@ -31,6 +31,7 @@ SAFE_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 ANNOTATION_KINDS = {"vline", "hline", "vspan", "hspan", "text"}
 ANNOTATION_X_INFERENCE = {"manual", "min_x", "max_x", "x_at_min_y", "x_at_max_y"}
 ANNOTATION_Y_INFERENCE = {"manual", "min_y", "max_y", "y_at_min_x", "y_at_max_x"}
+ANNOTATION_NUDGE_UNITS = {"ms", "s", "min", "h", "d", "w", "mo", "y"}
 DATETIME_TICK_UNITS = {"auto", "year", "month", "week", "day", "hour", "minute", "second"}
 STD_COLORS = ["#375E97", "#FB6542", "#c1195c", "#37975e"]
 DEFAULT_STYLE = {
@@ -967,6 +968,24 @@ def _validate_annotations(raw: Any, layers: list[dict[str, Any]]) -> list[dict[s
         )
         item["inference"] = {"x": x_mode, "y": y_mode, "layer_ids": layer_ids}
         item["fontsize"] = _font_size(item.get("fontsize", 10), "annotation font size")
+        try:
+            step = float(item.get("step", 1))
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError("annotation nudge step must be a positive number") from error
+        if not math.isfinite(step) or step <= 0:
+            raise ConfigurationError("annotation nudge step must be a positive number")
+        step_unit = str(item.get("step_unit", "d"))
+        if step_unit not in ANNOTATION_NUDGE_UNITS:
+            raise ConfigurationError(f"unsupported annotation nudge unit: {step_unit}")
+        try:
+            rotation = float(item.get("rotation", 0))
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError("annotation text rotation must be a number") from error
+        if not math.isfinite(rotation):
+            raise ConfigurationError("annotation text rotation must be finite")
+        item["step"] = step
+        item["step_unit"] = step_unit
+        item["rotation"] = rotation
         try:
             alpha = float(item.get("alpha", 0.6))
         except (TypeError, ValueError) as error:
@@ -1926,7 +1945,7 @@ def _annotation_axes(primary_axes: list[Any], item: dict[str, Any]) -> list[Any]
     else:
         return primary_axes
     try:
-        lower, upper = sorted(float(value) for value in values)
+        lower, upper = sorted(_annotation_axis_number(value) for value in values)
     except (TypeError, ValueError):
         return [primary_axes[-1]]
     matches = []
@@ -1941,7 +1960,7 @@ def _annotation_label_axis(annotation_axes: list[Any], item: dict[str, Any]) -> 
     if item.get("text_y") is None:
         return annotation_axes[0]
     try:
-        y = float(item["text_y"])
+        y = _annotation_axis_number(item["text_y"])
     except (TypeError, ValueError):
         return annotation_axes[0]
     for axis in annotation_axes:
@@ -1973,7 +1992,7 @@ def _annotation(
     if kind == "vline":
         ax.axvline(_annotation_x(item["x"]), **line_options)
     elif kind == "hline":
-        ax.axhline(item["y"], **line_options)
+        ax.axhline(_annotation_x(item["y"]), **line_options)
     elif kind == "vspan":
         ax.axvspan(
             _annotation_x(item["x1"]),
@@ -1985,8 +2004,8 @@ def _annotation(
         )
     elif kind == "hspan":
         ax.axhspan(
-            item["y1"],
-            item["y2"],
+            _annotation_x(item["y1"]),
+            _annotation_x(item["y2"]),
             facecolor=color,
             edgecolor="none",
             alpha=alpha,
@@ -1996,11 +2015,12 @@ def _annotation(
         _foreground_text(
             ax,
             _annotation_x(item["x"]),
-            item["y"],
+            _annotation_x(item["y"]),
             text,
             color=text_color,
             alpha=alpha,
             fontsize=float(item.get("fontsize", default_font_size)),
+            rotation=float(item.get("rotation", 0)),
             bbox=_annotation_bbox(item),
         )
     else:
@@ -2076,6 +2096,13 @@ def _annotation_x(value: Any) -> Any:
         return value
 
 
+def _annotation_axis_number(value: Any) -> float:
+    converted = _annotation_x(value)
+    if isinstance(converted, (date, datetime)):
+        return float(mdates.date2num(converted))
+    return float(converted)
+
+
 def _annotation_label(
     ax, item: dict[str, Any], text: str, color: str, alpha: float, fontsize: float
 ) -> None:
@@ -2084,7 +2111,7 @@ def _annotation_label(
         _foreground_text(
             ax,
             _annotation_x(item.get("text_x", item.get("x", item.get("x1")))),
-            item["text_y"],
+            _annotation_x(item["text_y"]),
             text,
             color=color,
             alpha=alpha,
@@ -2116,7 +2143,7 @@ def _annotation_label(
         _foreground_text(
             ax,
             0.99,
-            y,
+            _annotation_x(y),
             text,
             transform=ax.get_yaxis_transform(),
             x_data=False,

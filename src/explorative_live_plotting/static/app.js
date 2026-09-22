@@ -21,6 +21,10 @@ const filterSampleCache = new WeakMap();
 const filterTimeValueCache = new WeakMap();
 const STD_COLORS = ['#375E97', '#FB6542', '#c1195c', '#37975e'];
 const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+const ANNOTATION_NUDGE_UNITS = [
+  ['ms', 'milliseconds'], ['s', 'seconds'], ['min', 'minutes'], ['h', 'hours'],
+  ['d', 'days'], ['w', 'weeks'], ['mo', 'months'], ['y', 'years'],
+];
 let workspaces = [];
 let activeWorkspaceId = null;
 let workspaceNumber = 0;
@@ -47,6 +51,74 @@ const scalar = value => {
   const parsed = Number(text);
   return Number.isFinite(parsed) ? parsed : text;
 };
+
+function parseAnnotationDate(value) {
+  if (typeof value !== 'string') return null;
+  const match = value.trim().match(/^(\d{4,6})-(\d{2})-(\d{2})(?:([T ])(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?(Z|[+-]\d{2}:?\d{2})?)?$/);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, separator, hourText, minuteText, secondText, fraction = '', suffix = ''] = match;
+  const parts = {
+    year: Number(yearText), month: Number(monthText) - 1, day: Number(dayText),
+    hour: Number(hourText ?? 0), minute: Number(minuteText ?? 0), second: Number(secondText ?? 0),
+    millisecond: Number(`${fraction}000`.slice(0, 3)), yearWidth: yearText.length,
+    separator: separator ?? 'T', hasTime: Boolean(separator), hasSeconds: secondText !== undefined,
+    fraction, suffix,
+  };
+  const date = new Date(0);
+  date.setUTCHours(parts.hour, parts.minute, parts.second, parts.millisecond);
+  date.setUTCFullYear(parts.year, parts.month, parts.day);
+  if (
+    date.getUTCFullYear() !== parts.year || date.getUTCMonth() !== parts.month
+    || date.getUTCDate() !== parts.day || date.getUTCHours() !== parts.hour
+    || date.getUTCMinutes() !== parts.minute || date.getUTCSeconds() !== parts.second
+  ) return null;
+  return {date, parts};
+}
+
+const padded = (value, width = 2) => String(value).padStart(width, '0');
+
+function formatAnnotationDate(date, parts, unit) {
+  const datePart = `${padded(date.getUTCFullYear(), parts.yearWidth)}-${padded(date.getUTCMonth() + 1)}-${padded(date.getUTCDate())}`;
+  const includeTime = parts.hasTime || ['ms', 's', 'min', 'h'].includes(unit);
+  if (!includeTime) return datePart;
+  let result = `${datePart}${parts.separator}${padded(date.getUTCHours())}:${padded(date.getUTCMinutes())}`;
+  const includeSeconds = parts.hasSeconds || ['ms', 's'].includes(unit);
+  if (includeSeconds) result += `:${padded(date.getUTCSeconds())}`;
+  const fractionDigits = unit === 'ms' ? Math.max(3, parts.fraction.length) : parts.fraction.length;
+  if (fractionDigits) {
+    const subMillisecond = parts.fraction.slice(3);
+    result += `.${(`${padded(date.getUTCMilliseconds(), 3)}${subMillisecond}`).slice(0, fractionDigits)}`;
+  }
+  return `${result}${parts.suffix}`;
+}
+
+function nudgeAnnotationCoordinate(value, rawStep, unit, direction) {
+  const step = Number(rawStep);
+  if (!Number.isFinite(step) || step <= 0) throw new Error('Nudge step must be a positive number.');
+  const numeric = Number(value);
+  if ((typeof value === 'number' || String(value).trim() !== '') && Number.isFinite(numeric)) {
+    return numeric + direction * step;
+  }
+  const parsed = parseAnnotationDate(value);
+  if (!parsed) throw new Error('Nudge buttons require a numeric or ISO date/time coordinate.');
+  const date = parsed.date;
+  if (unit === 'mo' || unit === 'y') {
+    if (!Number.isInteger(step)) throw new Error('Month and year nudge steps must be whole numbers.');
+    const months = direction * step * (unit === 'y' ? 12 : 1);
+    const targetIndex = date.getUTCFullYear() * 12 + date.getUTCMonth() + months;
+    const targetYear = Math.floor(targetIndex / 12);
+    const targetMonth = ((targetIndex % 12) + 12) % 12;
+    const day = date.getUTCDate();
+    const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    date.setUTCDate(1);
+    date.setUTCFullYear(targetYear, targetMonth, Math.min(day, lastDay));
+  } else {
+    const milliseconds = {ms: 1, s: 1_000, min: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000}[unit];
+    if (milliseconds === undefined) throw new Error('Unknown nudge unit.');
+    date.setTime(date.getTime() + direction * step * milliseconds);
+  }
+  return formatAnnotationDate(date, parsed.parts, unit);
+}
 
 function message(text, error = false) {
   $('message').textContent = text;
@@ -510,6 +582,8 @@ function ensureConfig() {
     item.inference.layer_ids ??= [];
     item.fontsize ??= config.figure.font_size ?? 12;
     item.step ??= 1;
+    item.step_unit ??= 'd';
+    item.rotation ??= 0;
   });
 }
 
@@ -544,7 +618,7 @@ function newAnnotation(kind = 'text') {
     inference: {x: 'manual', y: 'manual', layer_ids: []},
     x: 0, y: 0, x1: 0, x2: 1,
     y1: 0, y2: 1, color: '#666666', alpha: 0.6, linestyle: '--',
-    fontsize: config.figure?.font_size ?? 12, step: 1,
+    fontsize: config.figure?.font_size ?? 12, step: 1, step_unit: 'd', rotation: 0,
   };
 }
 
@@ -934,7 +1008,7 @@ function renderAnnotations() {
     const selectedLayers = new Set(item.inference?.layer_ids ?? []);
     const layerOptions = config.layers.map(layer => `<option value="${escapeHtml(layer.id)}" ${selectedLayers.has(layer.id) ? 'selected' : ''}>${escapeHtml(layer.label || layer.id)}</option>`).join('');
     const hasX = ['text', 'vline'].includes(item.kind); const hasY = ['text', 'hline'].includes(item.kind);
-    card.innerHTML = `<div class="annotation-head"><input class="enabled" type="checkbox" ${item.enabled !== false ? 'checked' : ''}><label>ID<input class="annotation-id" value="${escapeHtml(item.id)}"></label><label>Annotation label<input class="annotation-label" value="${escapeHtml(item.label ?? '')}"></label><button class="remove">×</button></div><div class="grid"><label>Kind<select class="kind">${option(['text', 'vline', 'hline', 'vspan', 'hspan'], item.kind)}</select></label><label>Displayed text<input class="text" value="${escapeHtml(item.text ?? '')}" placeholder="Text drawn on the plot"></label>${coordinateFields}${hasX ? `<label>Infer X<select class="infer-x">${inferenceOptions('x', item.inference?.x ?? 'manual')}</select></label>` : ''}${hasY ? `<label>Infer Y<select class="infer-y">${inferenceOptions('y', item.inference?.y ?? 'manual')}</select></label>` : ''}<label>Inference layers<select class="inference-layers" multiple size="${Math.min(4, Math.max(2, config.layers.length))}">${layerOptions}</select><small>Ctrl/Cmd-click to select multiple layers.</small></label><label><span>Nudge step ${info('The amount added or subtracted from a numeric coordinate each time you click its − or + button. For example, a step of 1000000 moves Y by one million per click.')}</span><input class="step" value="${escapeHtml(item.step ?? 1)}"></label><label>Font size<span class="coordinate"><button type="button" class="font-down">−</button><input class="fontsize" type="number" min="1" value="${item.fontsize ?? 10}"><button type="button" class="font-up">+</button></span></label><label>Color<input class="color" type="color" value="${item.color ?? '#666666'}"></label><label><span><input class="text-background-enabled" type="checkbox" ${item.text_background_enabled ? 'checked' : ''}> Text background</span><input class="text-background-color" type="color" value="${item.text_background_color ?? '#ffffff'}"></label><label>Opacity<input class="alpha" type="number" min="0" max="1" step="0.05" value="${item.alpha ?? 0.6}"></label><label>Line style<select class="linestyle">${option(['-', '--', '-.', ':'], item.linestyle ?? '--')}</select></label><label class="legend-annotation"><span><input class="show-in-legend" type="checkbox" ${item.show_in_legend ? 'checked' : ''}> Add to legend</span><input class="legend-label" value="${escapeHtml(item.legend_label ?? '')}" placeholder="Legend label"></label></div>`;
+    card.innerHTML = `<div class="annotation-head"><input class="enabled" type="checkbox" ${item.enabled !== false ? 'checked' : ''}><label>ID<input class="annotation-id" value="${escapeHtml(item.id)}"></label><label>Annotation label<input class="annotation-label" value="${escapeHtml(item.label ?? '')}"></label><button class="duplicate" type="button">Duplicate</button><button class="remove">×</button></div><div class="grid"><label>Kind<select class="kind">${option(['text', 'vline', 'hline', 'vspan', 'hspan'], item.kind)}</select></label><label>Displayed text<input class="text" value="${escapeHtml(item.text ?? '')}" placeholder="Text drawn on the plot"></label>${coordinateFields}${hasX ? `<label>Infer X<select class="infer-x">${inferenceOptions('x', item.inference?.x ?? 'manual')}</select></label>` : ''}${hasY ? `<label>Infer Y<select class="infer-y">${inferenceOptions('y', item.inference?.y ?? 'manual')}</select></label>` : ''}<label>Inference layers<select class="inference-layers" multiple size="${Math.min(4, Math.max(2, config.layers.length))}">${layerOptions}</select><small>Ctrl/Cmd-click to select multiple layers.</small></label><label><span>Nudge step ${info('Numeric coordinates move by this amount. ISO date/time coordinates use the selected time unit.')}</span><span class="nudge-step"><input class="step" type="number" min="0" step="any" value="${escapeHtml(item.step ?? 1)}"><select class="step-unit">${ANNOTATION_NUDGE_UNITS.map(([value, label]) => `<option value="${value}" ${value === (item.step_unit ?? 'd') ? 'selected' : ''}>${label}</option>`).join('')}</select></span></label><label>Font size<span class="coordinate"><button type="button" class="font-down">−</button><input class="fontsize" type="number" min="1" value="${item.fontsize ?? 10}"><button type="button" class="font-up">+</button></span></label>${item.kind === 'text' ? `<label>Text rotation [°]<input class="rotation" type="number" step="any" value="${escapeHtml(item.rotation ?? 0)}"></label>` : ''}<label>Color<input class="color" type="color" value="${item.color ?? '#666666'}"></label><label><span><input class="text-background-enabled" type="checkbox" ${item.text_background_enabled ? 'checked' : ''}> Text background</span><input class="text-background-color" type="color" value="${item.text_background_color ?? '#ffffff'}"></label><label>Opacity<input class="alpha" type="number" min="0" max="1" step="0.05" value="${item.alpha ?? 0.6}"></label><label>Line style<select class="linestyle">${option(['-', '--', '-.', ':'], item.linestyle ?? '--')}</select></label><label class="legend-annotation"><span><input class="show-in-legend" type="checkbox" ${item.show_in_legend ? 'checked' : ''}> Add to legend</span><input class="legend-label" value="${escapeHtml(item.legend_label ?? '')}" placeholder="Legend label"></label></div>`;
     const q = selector => card.querySelector(selector);
     q('.enabled').onchange = event => { item.enabled = event.target.checked; renderStages(); syncAnnotationJson(); changed(false); };
     q('.annotation-id').onchange = event => {
@@ -944,12 +1018,26 @@ function renderAnnotations() {
     };
     q('.annotation-label').oninput = event => { item.label = event.target.value; syncAnnotationJson(); renderStages(); changed(false); };
     q('.text').oninput = event => { item.text = event.target.value; syncAnnotationJson(); changed(false); };
+    q('.duplicate').onclick = () => {
+      const duplicate = structuredClone(item);
+      const baseId = `${item.id}-copy`; let copyNumber = 1;
+      duplicate.id = baseId;
+      while (config.annotations.some(candidate => candidate.id === duplicate.id)) {
+        copyNumber += 1; duplicate.id = `${baseId}-${copyNumber}`;
+      }
+      duplicate.label = `${item.label || item.id} copy`;
+      if (duplicate.legend_label === item.label) duplicate.legend_label = duplicate.label;
+      config.annotations.splice(index + 1, 0, duplicate);
+      renderAnnotations(); renderStages(); changed(false);
+    };
     q('.remove').onclick = () => { config.annotations.splice(index, 1); reconcileStages(); renderAnnotations(); renderStages(); changed(false); };
     q('.kind').onchange = event => { item.kind = event.target.value; renderAnnotations(); changed(false); };
-    q('.step').onchange = event => { item.step = scalar(event.target.value); syncAnnotationJson(); };
+    q('.step').onchange = event => { item.step = Number(event.target.value); syncAnnotationJson(); };
+    q('.step-unit').onchange = event => { item.step_unit = event.target.value; syncAnnotationJson(); };
     q('.fontsize').onchange = event => { item.fontsize = Number(event.target.value); syncAnnotationJson(); changed(false); };
     q('.font-down').onclick = () => { item.fontsize = Math.max(1, Number(item.fontsize ?? 10) - 1); renderAnnotations(); changed(false); };
     q('.font-up').onclick = () => { item.fontsize = Number(item.fontsize ?? 10) + 1; renderAnnotations(); changed(false); };
+    if (q('.rotation')) q('.rotation').oninput = event => { item.rotation = Number(event.target.value); syncAnnotationJson(); changed(false); };
     q('.color').oninput = event => { item.color = event.target.value; item.text_color = event.target.value; syncAnnotationJson(); changed(false); };
     q('.text-background-enabled').onchange = event => { item.text_background_enabled = event.target.checked; syncAnnotationJson(); changed(false); };
     q('.text-background-color').oninput = event => { item.text_background_color = event.target.value; syncAnnotationJson(); changed(false); };
@@ -965,9 +1053,14 @@ function renderAnnotations() {
     });
     card.querySelectorAll('[data-nudge]').forEach(button => {
       button.onclick = () => {
-        const field = button.dataset.nudge; const current = Number(item[field]); const step = Number(item.step ?? 1);
-        if (!Number.isFinite(current) || !Number.isFinite(step)) return message('Nudge buttons require numeric coordinates and step.', true);
-        item[field] = current + Number(button.dataset.direction) * step;
+        const field = button.dataset.nudge;
+        try {
+          item[field] = nudgeAnnotationCoordinate(
+            item[field], item.step ?? 1, item.step_unit ?? 'd', Number(button.dataset.direction),
+          );
+        } catch (error) {
+          return message(error.message, true);
+        }
         renderAnnotations(); changed(false);
       };
     });

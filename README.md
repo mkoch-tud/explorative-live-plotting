@@ -473,15 +473,18 @@ when a layer has no explicit color.
 Annotations have structured browser editors for text, vertical/horizontal
 lines, and vertical/horizontal spans. Every annotation has an editable,
 unique ID and a separate descriptive label; **Displayed text** is the content
-drawn on the plot. Each editor also provides coordinates, color, opacity, line
-style, font size, and numeric coordinate/font nudge buttons. ISO datetime
-strings are accepted for X coordinates. On broken Y axes, coordinate-based
+drawn on the plot. Annotations can be duplicated with all values inherited.
+Each editor also provides coordinates, color, opacity, line style, font size,
+and coordinate/font nudge buttons. Text annotations accept an arbitrary
+rotation in degrees. ISO date and datetime strings are accepted for X and Y
+coordinates. On broken Y axes, coordinate-based
 text is drawn only in the panel containing its Y value, preventing duplicate
 text at panel boundaries. Text is always drawn above plot and grid artists.
 Enable **Text background** and select a color to place a colored box behind the
-text. **Nudge step** is the numeric amount added or subtracted on each press of
-an annotation coordinate's −/+ buttons; for example, a step of `1000000` moves
-Y by one million per click.
+text. **Nudge step** combines a freely chosen positive amount with milliseconds,
+seconds, minutes, hours, days, weeks, months, or years. Date/time coordinates
+use that interval, including calendar-aware month and year changes; numeric
+coordinates move by the amount itself.
 
 X and Y can optionally be inferred from computed plot layers. Select one or
 more **Inference layers**, then choose minimum/maximum X or Y, X at minimum or
