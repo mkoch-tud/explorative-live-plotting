@@ -204,6 +204,9 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
             raise ConfigurationError(
                 "time bin must be a positive Polars duration such as 1m, 1h, 1d, 1w, or 1mo"
             )
+    break_on_missing_time_bin = raw.get("break_on_missing_time_bin", False)
+    if not isinstance(break_on_missing_time_bin, bool):
+        raise ConfigurationError("break on missing time bin must be true or false")
     if plot_type not in {"histogram", "box", "violin"} and x_column is None:
         raise ConfigurationError(f"{plot_type} requires an x column")
     if aggregation not in {"count", "relative_count"} and y_column is None:
@@ -346,6 +349,7 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
         "aggregation_options": aggregation_options,
         "time_bin": time_bin,
         "time_bin_start_by": time_bin_start_by,
+        "break_on_missing_time_bin": break_on_missing_time_bin,
         "filter_logic": filter_logic,
         "base_filter_expression": base_filter_expression,
         "filter_expression": filter_expression,

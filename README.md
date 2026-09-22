@@ -218,6 +218,9 @@ anchor and defaults to Monday. For example, Thursday-anchored weeks use
 `"time_bin": "1w"` together with `"time_bin_start_by": "thursday"`. The
 selected aggregation is applied to Y inside each non-overlapping interval.
 This remains part of the lazy query, so raw rows are not collected in the UI.
+Enable **Break on missing time bin** to leave gaps in line, step, and area plots
+when one or more intervals contain no rows; it is disabled by default and does
+not change the aggregated values.
 Time-binned plots automatically use date-aware ticks that adapt from dates down
 to hours, minutes, seconds, and fractions as appropriate for the visible span.
 Set **Datetime tick format** to override those automatic labels with a Python

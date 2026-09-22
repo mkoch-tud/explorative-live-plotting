@@ -271,6 +271,15 @@ def _draw_code(index: int, layer: dict[str, Any]) -> str:
         ),
         "        plot_style = _plot_style(style)",
     ]
+    if (
+        layer["break_on_missing_time_bin"]
+        and layer["time_bin"]
+        and plot_type in {"line", "step", "area"}
+    ):
+        lines.insert(
+            -1,
+            f"        x, y = _break_missing_time_bins(x, y, {layer['time_bin']!r})",
+        )
     if plot_type == "line":
         lines.append("        ax.plot(x, y, label=label, **plot_style)")
     elif plot_type == "step":
@@ -410,6 +419,67 @@ def _groups(frame):
 def _plot_style(style):
     allowed = {"color", "alpha", "linewidth", "linestyle", "marker", "markersize", "zorder"}
     return {key: value for key, value in style.items() if key in allowed}
+
+
+def _shift_time_bin(value, time_bin, direction):
+    match = re.fullmatch(r"([1-9]\\d*)(ns|us|ms|s|m|h|d|w|mo|q|y)", time_bin)
+    if match is None or not isinstance(value, (datetime.date, datetime.datetime)):
+        return None
+    amount = int(match.group(1)) * direction
+    unit = match.group(2)
+    if unit in {"mo", "q", "y"}:
+        months = amount * {"mo": 1, "q": 3, "y": 12}[unit]
+        month_index = value.year * 12 + value.month - 1 + months
+        year, zero_based_month = divmod(month_index, 12)
+        month = zero_based_month + 1
+        if month == 12:
+            following = datetime.date(year + 1, 1, 1)
+        else:
+            following = datetime.date(year, month + 1, 1)
+        last_day = (following - datetime.timedelta(days=1)).day
+        return value.replace(year=year, month=month, day=min(value.day, last_day))
+    microseconds = amount * {
+        "ns": 0.001,
+        "us": 1,
+        "ms": 1_000,
+        "s": 1_000_000,
+        "m": 60_000_000,
+        "h": 3_600_000_000,
+        "d": 86_400_000_000,
+        "w": 604_800_000_000,
+    }[unit]
+    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+        if abs(microseconds) < 86_400_000_000:
+            return None
+        return value + datetime.timedelta(days=microseconds / 86_400_000_000)
+    if abs(microseconds) < 1:
+        return None
+    return value + datetime.timedelta(microseconds=microseconds)
+
+
+def _break_missing_time_bins(x_values, y_values, time_bin):
+    if len(x_values) != len(y_values) or len(x_values) < 2:
+        return x_values, y_values
+    result_x = [x_values[0]]
+    result_y = [y_values[0]]
+    for previous, current, value in zip(
+        x_values[:-1], x_values[1:], y_values[1:], strict=True
+    ):
+        try:
+            direction = 1 if current > previous else -1 if current < previous else 0
+            expected = _shift_time_bin(previous, time_bin, direction) if direction else None
+            skipped = bool(
+                expected is not None
+                and (current > expected if direction > 0 else current < expected)
+            )
+        except (TypeError, ValueError, OverflowError):
+            skipped = False
+        if skipped:
+            result_x.append(current)
+            result_y.append(float("nan"))
+        result_x.append(current)
+        result_y.append(value)
+    return result_x, result_y
 
 
 def _limits(ax, lower, upper, axis):

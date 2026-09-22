@@ -491,6 +491,9 @@ def _migrate_legacy_line(
             else None
         )
         or "monday",
+        "break_on_missing_time_bin": bool(
+            raw.get("break_on_missing_time_bin", False)
+        ),
         "filter_logic": raw.get("filter_logic", "and"),
         "required_filters": required_filters,
         "filters": filters,
@@ -718,6 +721,9 @@ def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
     for index, layer in enumerate(config["layers"]):
         layer.setdefault("id", f"layer-{index + 1}")
         layer["fix_x_values"] = bool(layer.get("fix_x_values", False))
+        layer["break_on_missing_time_bin"] = bool(
+            layer.get("break_on_missing_time_bin", False)
+        )
     x_anchors = [layer for layer in config["layers"] if layer["fix_x_values"]]
     if len(x_anchors) > 1:
         raise ConfigurationError("only one layer can fix the shared X values")
@@ -1286,21 +1292,28 @@ def build_figure(
                 style = {**DEFAULT_STYLE, "color": default_color, **layer["style"]}
                 if style.get("marker") == "none":
                     style["marker"] = None
+                plot_x = group_frame.get_column("_x").to_list()
+                plot_y = (
+                    group_frame.get_column("_y").drop_nulls().to_list()
+                    if layer["plot_type"] in {"histogram", "box", "violin"}
+                    else group_frame.get_column("_y").to_list()
+                )
+                if (
+                    layer["break_on_missing_time_bin"]
+                    and layer["time_bin"]
+                    and layer["plot_type"] in {"line", "step", "area"}
+                ):
+                    plot_x, plot_y = _break_missing_time_bins(
+                        plot_x, plot_y, layer["time_bin"]
+                    )
+                if shared_x_positions is not None:
+                    plot_x = [shared_x_positions[value] for value in plot_x]
                 context = PlotContext(
                     ax=axis,
                     frame=group_frame,
                     layer=layer,
-                    x=(
-                        [
-                            shared_x_positions[value]
-                            for value in group_frame.get_column("_x").to_list()
-                        ]
-                        if shared_x_positions is not None
-                        else group_frame.get_column("_x").to_list()
-                    ),
-                    y=group_frame.get_column("_y").drop_nulls().to_list()
-                    if layer["plot_type"] in {"histogram", "box", "violin"}
-                    else group_frame.get_column("_y").to_list(),
+                    x=plot_x,
+                    y=plot_y,
                     label=label,
                     style=style,
                     state=state,
@@ -1646,6 +1659,76 @@ def _automatic_x_limits(ax, values: list[Any], time_bins: list[str]) -> None:
         lower -= padding
         upper += padding
     ax.set_xlim(lower, upper)
+
+
+def _shift_time_bin(value: Any, time_bin: str, direction: int) -> Any | None:
+    """Move a date/datetime by one Polars-style time interval."""
+
+    match = re.fullmatch(r"([1-9]\d*)(ns|us|ms|s|m|h|d|w|mo|q|y)", time_bin)
+    if match is None or not isinstance(value, (date, datetime)):
+        return None
+    amount = int(match.group(1)) * direction
+    unit = match.group(2)
+    if unit in {"mo", "q", "y"}:
+        months = amount * {"mo": 1, "q": 3, "y": 12}[unit]
+        month_index = value.year * 12 + value.month - 1 + months
+        year, zero_based_month = divmod(month_index, 12)
+        month = zero_based_month + 1
+        if month == 12:
+            following = date(year + 1, 1, 1)
+        else:
+            following = date(year, month + 1, 1)
+        last_day = (following - timedelta(days=1)).day
+        return value.replace(year=year, month=month, day=min(value.day, last_day))
+
+    microseconds = amount * {
+        "ns": 0.001,
+        "us": 1,
+        "ms": 1_000,
+        "s": 1_000_000,
+        "m": 60_000_000,
+        "h": 3_600_000_000,
+        "d": 86_400_000_000,
+        "w": 604_800_000_000,
+    }[unit]
+    if isinstance(value, date) and not isinstance(value, datetime):
+        if abs(microseconds) < 86_400_000_000:
+            return None
+        return value + timedelta(days=microseconds / 86_400_000_000)
+    if abs(microseconds) < 1:
+        return None
+    return value + timedelta(microseconds=microseconds)
+
+
+def _break_missing_time_bins(
+    x_values: list[Any], y_values: list[Any], time_bin: str
+) -> tuple[list[Any], list[Any]]:
+    """Insert NaN separators where adjacent timestamps skip a time bin."""
+
+    if len(x_values) != len(y_values) or len(x_values) < 2:
+        return x_values, y_values
+    result_x = [x_values[0]]
+    result_y = [y_values[0]]
+    for previous, current, value in zip(
+        x_values[:-1], x_values[1:], y_values[1:], strict=True
+    ):
+        try:
+            direction = 1 if current > previous else -1 if current < previous else 0
+            expected = _shift_time_bin(previous, time_bin, direction) if direction else None
+            skipped = bool(
+                expected is not None
+                and (current > expected if direction > 0 else current < expected)
+            )
+        except (TypeError, ValueError, OverflowError):
+            skipped = False
+        if skipped:
+            # Duplicate the next real X coordinate so this also works when a
+            # shared categorical X domain maps timestamps to integer positions.
+            result_x.append(current)
+            result_y.append(math.nan)
+        result_x.append(current)
+        result_y.append(value)
+    return result_x, result_y
 
 
 def _smallest_time_bin_days(time_bins: list[str]) -> float:
