@@ -246,7 +246,13 @@ Choose **even date range** to include a precise start and end date with a
 configurable number of evenly spaced ticks. For example, start `2024-01-01`,
 end `2026-08-01`, and count `6` creates six ticks including both endpoints.
 Spacing is based on elapsed time, so intermediate ticks need not fall on the
-first day of a calendar month.
+first day of a calendar month. When this locator is selected in the UI, ELP
+queries the minimum and maximum of the enabled layers' temporal axis columns.
+It aligns the range to seconds, minutes, hours, days, months, or years and uses
+`floor(unit span / 3) + 2` ticks. Thus January through December 2024 spans 11
+calendar months and defaults to five ticks. Direct JSON configurations that
+omit `count` retain the generic default of six.
+
 Common fields are `%Y` (year), `%y` (short year), `%b`/`%B` (abbreviated/full
 month), `%m` (numeric month), `%d` (day), and `%H:%M:%S` (time). The browser
 shows this reference next to the setting.

@@ -17,6 +17,7 @@ let editingSourceName = null;
 let serverConfigDirectory = null;
 let systemStatsTimer = null;
 let filterControlSequence = 0;
+const locatorDefaultSequences = {};
 const filterSampleCache = new WeakMap();
 const filterTimeValueCache = new WeakMap();
 const STD_COLORS = ['#375E97', '#FB6542', '#c1195c', '#37975e'];
@@ -141,6 +142,92 @@ function nudgeAnnotationCoordinate(value, rawStep, unit, direction) {
     date.setTime(date.getTime() + direction * step * milliseconds);
   }
   return formatAnnotationDate(date, parsed.parts, unit);
+}
+
+function alignedDateRangeBoundary(value, unit) {
+  const date = new Date(value.getTime());
+  date.setUTCMilliseconds(0);
+  if (unit !== 'second') date.setUTCSeconds(0);
+  if (!['second', 'minute'].includes(unit)) date.setUTCMinutes(0);
+  if (!['second', 'minute', 'hour'].includes(unit)) date.setUTCHours(0);
+  if (['month', 'year'].includes(unit)) date.setUTCDate(1);
+  if (unit === 'year') date.setUTCMonth(0);
+  return date;
+}
+
+function dateRangeUnitDifference(start, end, unit) {
+  if (unit === 'year') return end.getUTCFullYear() - start.getUTCFullYear();
+  if (unit === 'month') return (end.getUTCFullYear() - start.getUTCFullYear()) * 12 + end.getUTCMonth() - start.getUTCMonth();
+  const divisors = {day: 86_400_000, hour: 3_600_000, minute: 60_000, second: 1_000};
+  return Math.floor((end.getTime() - start.getTime()) / divisors[unit]);
+}
+
+function formatDateRangeBoundary(date, unit) {
+  const datePart = `${padded(date.getUTCFullYear(), 4)}-${padded(date.getUTCMonth() + 1)}-${padded(date.getUTCDate())}`;
+  if (['year', 'month', 'day'].includes(unit)) return datePart;
+  return `${datePart}T${padded(date.getUTCHours())}:${padded(date.getUTCMinutes())}:${padded(date.getUTCSeconds())}`;
+}
+
+function evenDateRangeDefaults(minimum, maximum) {
+  const first = parseAnnotationDate(String(minimum))?.date;
+  const last = parseAnnotationDate(String(maximum))?.date;
+  if (!first || !last) throw new Error('Timestamp bounds must be ISO dates or timestamps.');
+  const ordered = first <= last ? [first, last] : [last, first];
+  const formats = {year: '%Y', month: '%b-%y', day: '%b %d', hour: '%b %d %H:%M', minute: '%H:%M', second: '%H:%M:%S'};
+  let selected = null;
+  for (const unit of ['year', 'month', 'day', 'hour', 'minute', 'second']) {
+    const start = alignedDateRangeBoundary(ordered[0], unit);
+    const end = alignedDateRangeBoundary(ordered[1], unit);
+    const difference = dateRangeUnitDifference(start, end, unit);
+    if (difference >= 3 || unit === 'second') {
+      selected = {unit, start, end, difference}; break;
+    }
+  }
+  if (selected.end <= selected.start) {
+    selected.end = new Date(selected.start.getTime() + 1_000);
+    selected.difference = 1;
+  }
+  return {
+    options: {
+      start: formatDateRangeBoundary(selected.start, selected.unit),
+      end: formatDateRangeBoundary(selected.end, selected.unit),
+      count: Math.floor(selected.difference / 3) + 2,
+    },
+    format: formats[selected.unit],
+    unit: selected.unit,
+  };
+}
+
+function temporalColumnsForLocator(prefix) {
+  const pairs = [];
+  for (const layer of config.layers ?? []) {
+    if (layer.enabled === false) continue;
+    let column = null;
+    if (prefix.startsWith('x_')) column = layer.x_column;
+    else if (prefix.startsWith('secondary_y_') && layer.secondary_y) column = layer.y_column;
+    else if (prefix.startsWith('y_') && !layer.secondary_y) column = layer.y_column;
+    if (!column || !temporalColumn(layer.source, column)) continue;
+    if (!pairs.some(item => item.source === layer.source && item.column === column)) {
+      pairs.push({source: layer.source, column});
+    }
+  }
+  return pairs;
+}
+
+async function inferredDateRangeDefaults(prefix, workspaceId) {
+  const excerpts = await Promise.all(temporalColumnsForLocator(prefix).map(async item => {
+    const response = await apiFetch(`/api/sources/${encodeURIComponent(item.source)}/column-excerpt?column=${encodeURIComponent(item.column)}&intermediate=0`, {}, workspaceId);
+    if (!response.ok) throw new Error(await apiError(response, workspaceId));
+    return (await response.json()).values ?? [];
+  }));
+  const bounds = excerpts.flatMap(values => values.length ? [values[0], values.at(-1)] : []);
+  const parsed = bounds.map(value => ({value, parsed: parseAnnotationDate(String(value))?.date})).filter(item => item.parsed);
+  if (!parsed.length) {
+    const year = new Date().getUTCFullYear();
+    return evenDateRangeDefaults(`${year}-01-01`, `${year}-12-01`);
+  }
+  parsed.sort((left, right) => left.parsed - right.parsed);
+  return evenDateRangeDefaults(parsed[0].value, parsed.at(-1).value);
 }
 
 function message(text, error = false) {
@@ -659,6 +746,10 @@ function newAnnotation(kind = 'text') {
 function renderTickLocatorEditors() {
   const root = $('tick-locator-editors');
   if (!root) return;
+  const openGroups = new Set(
+    [...root.querySelectorAll('details[data-locator-group][open]')]
+      .map(item => item.dataset.locatorGroup),
+  );
   const groups = [
     ['X axis', 'x_major', 'x_minor'],
     ['Primary Y axis', 'y_major', 'y_minor'],
@@ -681,14 +772,44 @@ function renderTickLocatorEditors() {
       }).join('');
       return `<fieldset class="tick-locator" data-prefix="${prefix}"><legend>${label}</legend><label>Locator<select class="locator-type">${TICK_LOCATOR_TYPES.map(([value, text]) => `<option value="${value}" ${value === locator ? 'selected' : ''}>${text}</option>`).join('')}</select></label>${optionFields ? `<div class="locator-options grid">${optionFields}</div>` : ''}<label><span>Date/numeric format (optional) ${info('Calendar locators use strftime fields such as %Y, %b, %m, %d, and %H:%M:%S. Numeric locators accept formats such as {x:.1f}.')}</span><input class="locator-format" value="${escapeHtml(format)}" placeholder="%b-%y or {x:.1f}"></label></fieldset>`;
     };
-    return `<details class="config-subsection inner"><summary>${title}</summary><div class="config-subsection-body locator-pair">${editor(major, 'Major')}${editor(minor, 'Minor')}</div></details>`;
+    return `<details class="config-subsection inner" data-locator-group="${major}"><summary>${title}</summary><div class="config-subsection-body locator-pair">${editor(major, 'Major')}${editor(minor, 'Minor')}</div></details>`;
   }).join('');
+  root.querySelectorAll('details[data-locator-group]').forEach(item => {
+    item.open = openGroups.has(item.dataset.locatorGroup);
+  });
   root.querySelectorAll('.tick-locator').forEach(editor => {
     const prefix = editor.dataset.prefix;
-    editor.querySelector('.locator-type').onchange = event => {
+    editor.querySelector('.locator-type').onchange = async event => {
+      const locator = event.target.value;
+      const sequence = (locatorDefaultSequences[prefix] ?? 0) + 1;
+      locatorDefaultSequences[prefix] = sequence;
       config.axes[`${prefix}_locator`] = event.target.value;
       config.axes[`${prefix}_locator_options`] = {};
       renderTickLocatorEditors();
+      if (locator === 'date_range') {
+        const workspaceId = activeWorkspaceId;
+        message('Finding the timestamp range…');
+        try {
+          const defaults = await inferredDateRangeDefaults(prefix, workspaceId);
+          if (
+            sequence !== locatorDefaultSequences[prefix] || workspaceId !== activeWorkspaceId
+            || config.axes[`${prefix}_locator`] !== 'date_range'
+          ) return;
+          config.axes[`${prefix}_locator_options`] = defaults.options;
+          if (!config.axes[`${prefix}_tick_format`]) {
+            config.axes[`${prefix}_tick_format`] = defaults.format;
+          }
+          renderTickLocatorEditors();
+        } catch (error) {
+          if (sequence !== locatorDefaultSequences[prefix] || workspaceId !== activeWorkspaceId) return;
+          const year = new Date().getUTCFullYear();
+          const fallback = evenDateRangeDefaults(`${year}-01-01`, `${year}-12-01`);
+          config.axes[`${prefix}_locator_options`] = fallback.options;
+          if (!config.axes[`${prefix}_tick_format`]) config.axes[`${prefix}_tick_format`] = fallback.format;
+          renderTickLocatorEditors();
+          message(`Could not infer timestamp bounds; using the current year. ${error.message}`, true);
+        }
+      }
       changed(false);
     };
     editor.querySelectorAll('.locator-option input, .locator-option select').forEach(input => {
