@@ -25,6 +25,27 @@ const ANNOTATION_NUDGE_UNITS = [
   ['ms', 'milliseconds'], ['s', 'seconds'], ['min', 'minutes'], ['h', 'hours'],
   ['d', 'days'], ['w', 'weeks'], ['mo', 'months'], ['y', 'years'],
 ];
+const TICK_LOCATOR_TYPES = [
+  ['auto', 'auto'], ['none', 'none'], ['year', 'yearly'], ['month', 'monthly'],
+  ['weekday', 'weekly / weekday'], ['day', 'daily'], ['hour', 'hourly'], ['minute', 'every minute'],
+  ['second', 'every second'], ['microsecond', 'every microsecond'], ['multiple', 'numeric multiple'],
+  ['max_n', 'numeric max-N'], ['log', 'logarithmic'], ['fixed', 'fixed values'],
+];
+const TICK_LOCATOR_OPTIONS = {
+  auto: [], none: [],
+  year: [['interval', 'Year interval', 'integer'], ['month', 'Month (1–12)', 'integer'], ['day', 'Day (1–31)', 'integer']],
+  month: [['interval', 'Interval', 'integer'], ['bymonth', 'Months (1–12)', 'integer-list'], ['bymonthday', 'Days of month', 'integer-list']],
+  weekday: [['interval', 'Interval', 'integer'], ['byweekday', 'Weekdays', 'text-list']],
+  day: [['interval', 'Interval', 'integer'], ['bymonthday', 'Days of month', 'integer-list']],
+  hour: [['interval', 'Interval', 'integer'], ['byhour', 'Hours (0–23)', 'integer-list']],
+  minute: [['interval', 'Interval', 'integer'], ['byminute', 'Minutes (0–59)', 'integer-list']],
+  second: [['interval', 'Interval', 'integer'], ['bysecond', 'Seconds (0–59)', 'integer-list']],
+  microsecond: [['interval', 'Interval', 'integer']],
+  multiple: [['base', 'Multiple', 'number'], ['offset', 'Offset', 'number']],
+  max_n: [['nbins', 'Maximum bins', 'integer'], ['steps', 'Allowed steps', 'number-list'], ['integer', 'Integer ticks', 'boolean'], ['symmetric', 'Symmetric', 'boolean'], ['prune', 'Prune edge', 'prune'], ['min_n_ticks', 'Minimum ticks', 'integer']],
+  log: [['base', 'Base', 'number'], ['subs', 'Subdivisions', 'number-list'], ['numticks', 'Maximum ticks', 'integer']],
+  fixed: [['values', 'Tick values', 'number-list']],
+};
 let workspaces = [];
 let activeWorkspaceId = null;
 let workspaceNumber = 0;
@@ -555,6 +576,17 @@ function setupPanelResizer() {
 function ensureConfig() {
   config.figure ??= {};
   config.axes ??= {};
+  const axes = config.axes;
+  const legacyXLocator = axes.x_datetime_tick_unit === 'week' ? 'weekday' : (axes.x_datetime_tick_unit ?? 'auto');
+  axes.x_major_locator ??= legacyXLocator;
+  axes.x_major_locator_options ??= legacyXLocator === 'auto' ? {} : {interval: axes.x_datetime_tick_interval ?? 1};
+  axes.x_major_tick_format ??= axes.x_datetime_format ?? '';
+  for (const prefix of ['x_minor', 'y_major', 'y_minor', 'secondary_y_major', 'secondary_y_minor']) {
+    axes[`${prefix}_locator`] ??= 'auto';
+    axes[`${prefix}_locator_options`] ??= {};
+    axes[`${prefix}_tick_format`] ??= '';
+  }
+  axes.x_minor_tick_format ??= '';
   config.legend ??= {};
   config.broken_y_axis ??= {enabled: false, gap: 0.1, ranges: []};
   config.broken_y_axis.ranges ??= [];
@@ -620,6 +652,66 @@ function newAnnotation(kind = 'text') {
     y1: 0, y2: 1, color: '#666666', alpha: 0.6, linestyle: '--',
     fontsize: config.figure?.font_size ?? 12, step: 1, step_unit: 'd', rotation: 0,
   };
+}
+
+function renderTickLocatorEditors() {
+  const root = $('tick-locator-editors');
+  if (!root) return;
+  const groups = [
+    ['X axis', 'x_major', 'x_minor'],
+    ['Primary Y axis', 'y_major', 'y_minor'],
+    ['Secondary Y axis', 'secondary_y_major', 'secondary_y_minor'],
+  ];
+  root.innerHTML = groups.map(([title, major, minor]) => {
+    const editor = (prefix, label) => {
+      const locator = config.axes[`${prefix}_locator`] ?? 'auto';
+      const options = config.axes[`${prefix}_locator_options`] ?? {};
+      const format = config.axes[`${prefix}_tick_format`] ?? '';
+      const optionFields = (TICK_LOCATOR_OPTIONS[locator] ?? []).map(([key, optionLabel, type]) => {
+        const value = options[key];
+        if (type === 'boolean') return `<label class="locator-option checkbox-option"><span><input type="checkbox" data-key="${key}" data-type="${type}" ${value === true ? 'checked' : ''}> ${optionLabel}</span></label>`;
+        if (type === 'prune') return `<label class="locator-option">${optionLabel}<select data-key="${key}" data-type="${type}"><option value="">none</option>${['lower', 'upper', 'both'].map(item => `<option ${value === item ? 'selected' : ''}>${item}</option>`).join('')}</select></label>`;
+        const displayed = Array.isArray(value) ? value.join(', ') : (value ?? '');
+        const inputType = ['integer', 'number'].includes(type) ? 'number' : 'text';
+        const step = type === 'integer' ? '1' : 'any';
+        const placeholder = key === 'byweekday' ? 'monday, friday or 0, 4' : type.endsWith('-list') ? 'comma-separated' : '';
+        return `<label class="locator-option">${optionLabel}<input data-key="${key}" data-type="${type}" type="${inputType}" step="${step}" value="${escapeHtml(displayed)}" placeholder="${placeholder}"></label>`;
+      }).join('');
+      return `<fieldset class="tick-locator" data-prefix="${prefix}"><legend>${label}</legend><label>Locator<select class="locator-type">${TICK_LOCATOR_TYPES.map(([value, text]) => `<option value="${value}" ${value === locator ? 'selected' : ''}>${text}</option>`).join('')}</select></label>${optionFields ? `<div class="locator-options grid">${optionFields}</div>` : ''}<label><span>Date/numeric format (optional) ${info('Calendar locators use strftime fields such as %Y, %b, %m, %d, and %H:%M:%S. Numeric locators accept formats such as {x:.1f}.')}</span><input class="locator-format" value="${escapeHtml(format)}" placeholder="%b-%y or {x:.1f}"></label></fieldset>`;
+    };
+    return `<details class="config-subsection inner"><summary>${title}</summary><div class="config-subsection-body locator-pair">${editor(major, 'Major')}${editor(minor, 'Minor')}</div></details>`;
+  }).join('');
+  root.querySelectorAll('.tick-locator').forEach(editor => {
+    const prefix = editor.dataset.prefix;
+    editor.querySelector('.locator-type').onchange = event => {
+      config.axes[`${prefix}_locator`] = event.target.value;
+      config.axes[`${prefix}_locator_options`] = {};
+      renderTickLocatorEditors();
+      changed(false);
+    };
+    editor.querySelectorAll('.locator-option input, .locator-option select').forEach(input => {
+      input.onchange = event => {
+        const {key, type} = event.target.dataset;
+        const options = {...(config.axes[`${prefix}_locator_options`] ?? {})};
+        const raw = type === 'boolean' ? event.target.checked : event.target.value.trim();
+        if (raw === '') delete options[key];
+        else if (type === 'integer') options[key] = Number.parseInt(raw, 10);
+        else if (type === 'number') options[key] = Number(raw);
+        else if (type === 'integer-list' || type === 'number-list') options[key] = raw.split(',').map(value => Number(value.trim()));
+        else if (type === 'text-list') options[key] = raw.split(',').map(value => value.trim()).filter(Boolean);
+        else options[key] = raw;
+        config.axes[`${prefix}_locator_options`] = options;
+        changed(false);
+      };
+    });
+    editor.querySelector('.locator-format').oninput = event => {
+      config.axes[`${prefix}_tick_format`] = event.target.value; changed(false);
+    };
+  });
+  const legacyGrid = $('x-datetime-tick-unit')?.closest('.grid');
+  const legacyFormat = $('x-datetime-format')?.closest('label');
+  if (legacyGrid) legacyGrid.hidden = true;
+  if (legacyFormat) legacyFormat.hidden = true;
 }
 
 function renderBrokenYRanges() {
@@ -1152,6 +1244,24 @@ function collect() {
     x_datetime_tick_unit: $('x-datetime-tick-unit').value,
     x_datetime_tick_interval: Number($('x-datetime-tick-interval').value),
     x_datetime_format: $('x-datetime-format').value,
+    x_major_locator: config.axes.x_major_locator ?? 'auto',
+    x_major_locator_options: structuredClone(config.axes.x_major_locator_options ?? {}),
+    x_major_tick_format: config.axes.x_major_tick_format ?? '',
+    x_minor_locator: config.axes.x_minor_locator ?? 'auto',
+    x_minor_locator_options: structuredClone(config.axes.x_minor_locator_options ?? {}),
+    x_minor_tick_format: config.axes.x_minor_tick_format ?? '',
+    y_major_locator: config.axes.y_major_locator ?? 'auto',
+    y_major_locator_options: structuredClone(config.axes.y_major_locator_options ?? {}),
+    y_major_tick_format: config.axes.y_major_tick_format ?? '',
+    y_minor_locator: config.axes.y_minor_locator ?? 'auto',
+    y_minor_locator_options: structuredClone(config.axes.y_minor_locator_options ?? {}),
+    y_minor_tick_format: config.axes.y_minor_tick_format ?? '',
+    secondary_y_major_locator: config.axes.secondary_y_major_locator ?? 'auto',
+    secondary_y_major_locator_options: structuredClone(config.axes.secondary_y_major_locator_options ?? {}),
+    secondary_y_major_tick_format: config.axes.secondary_y_major_tick_format ?? '',
+    secondary_y_minor_locator: config.axes.secondary_y_minor_locator ?? 'auto',
+    secondary_y_minor_locator_options: structuredClone(config.axes.secondary_y_minor_locator_options ?? {}),
+    secondary_y_minor_tick_format: config.axes.secondary_y_minor_tick_format ?? '',
     x_tick_rotation: Number($('rotation').value), x_tick_horizontal_alignment: $('tick-ha').value,
     x_tick_vertical_alignment: $('tick-va').value, x_engineering: $('x-engineering').checked,
     y_engineering: $('y-engineering').checked, secondary_y_engineering: $('secondary-y-engineering').checked,
@@ -1257,7 +1367,7 @@ function apply(next) {
   $('tick-va').value = axes.x_tick_vertical_alignment ?? 'top'; $('legend').checked = config.legend.enabled ?? true;
   $('stages-enabled').checked = config.stages.enabled ?? false; $('overlay-alpha').value = config.stages.overlay_alpha ?? 0.25;
   for (const format of ['png', 'pdf', 'json']) $(format).checked = (config.export_formats ?? []).includes(format);
-  renderBrokenYRanges(); updateBrokenYAxisState(); updateXValueTickState();
+  renderBrokenYRanges(); renderTickLocatorEditors(); updateBrokenYAxisState(); updateXValueTickState();
   updateFontControlState(); updateLegendBboxState(); renderLayers(); renderAnnotations(); renderStages();
 }
 

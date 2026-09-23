@@ -33,6 +33,40 @@ ANNOTATION_X_INFERENCE = {"manual", "min_x", "max_x", "x_at_min_y", "x_at_max_y"
 ANNOTATION_Y_INFERENCE = {"manual", "min_y", "max_y", "y_at_min_x", "y_at_max_x"}
 ANNOTATION_NUDGE_UNITS = {"ms", "s", "min", "h", "d", "w", "mo", "y"}
 DATETIME_TICK_UNITS = {"auto", "year", "month", "week", "day", "hour", "minute", "second"}
+TICK_LOCATORS = {
+    "auto",
+    "none",
+    "year",
+    "month",
+    "weekday",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "microsecond",
+    "multiple",
+    "max_n",
+    "log",
+    "fixed",
+}
+DATE_TICK_LOCATORS = {
+    "year",
+    "month",
+    "weekday",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "microsecond",
+}
+TICK_LOCATOR_ALIASES = {
+    "yearly": "year",
+    "monthly": "month",
+    "weekly": "weekday",
+    "daily": "day",
+    "hourly": "hour",
+    "minutely": "minute",
+}
 STD_COLORS = ["#375E97", "#FB6542", "#c1195c", "#37975e"]
 DEFAULT_STYLE = {
     "color": STD_COLORS[0],
@@ -97,6 +131,24 @@ def default_config(config_module: str | None = None) -> dict[str, Any]:
             "x_datetime_tick_unit": "auto",
             "x_datetime_tick_interval": 1,
             "x_datetime_format": "",
+            "x_major_locator": "auto",
+            "x_major_locator_options": {},
+            "x_major_tick_format": "",
+            "x_minor_locator": "auto",
+            "x_minor_locator_options": {},
+            "x_minor_tick_format": "",
+            "y_major_locator": "auto",
+            "y_major_locator_options": {},
+            "y_major_tick_format": "",
+            "y_minor_locator": "auto",
+            "y_minor_locator_options": {},
+            "y_minor_tick_format": "",
+            "secondary_y_major_locator": "auto",
+            "secondary_y_major_locator_options": {},
+            "secondary_y_major_tick_format": "",
+            "secondary_y_minor_locator": "auto",
+            "secondary_y_minor_locator_options": {},
+            "secondary_y_minor_tick_format": "",
             "x_tick_rotation": 0,
             "x_tick_horizontal_alignment": "center",
             "x_tick_vertical_alignment": "top",
@@ -562,6 +614,183 @@ def _migrate_legacy_stages(
     }
 
 
+def _validate_tick_locator(axes: dict[str, Any], prefix: str) -> None:
+    locator = str(axes.get(f"{prefix}_locator", "auto")).strip().lower()
+    locator = TICK_LOCATOR_ALIASES.get(locator, locator)
+    if locator not in TICK_LOCATORS:
+        raise ConfigurationError(
+            f"unsupported {prefix.replace('_', ' ')} locator: {locator}"
+        )
+    options = axes.get(f"{prefix}_locator_options", {})
+    if not isinstance(options, dict):
+        raise ConfigurationError(
+            f"{prefix.replace('_', ' ')} locator options must be a JSON object"
+        )
+    allowed = {
+        "auto": set(),
+        "none": set(),
+        "year": {"interval", "base", "month", "day"},
+        "month": {"interval", "bymonth", "bymonthday"},
+        "weekday": {"interval", "byweekday"},
+        "day": {"interval", "bymonthday"},
+        "hour": {"interval", "byhour"},
+        "minute": {"interval", "byminute"},
+        "second": {"interval", "bysecond"},
+        "microsecond": {"interval"},
+        "multiple": {"base", "offset"},
+        "max_n": {"nbins", "steps", "integer", "symmetric", "prune", "min_n_ticks"},
+        "log": {"base", "subs", "numticks"},
+        "fixed": {"values"},
+    }[locator]
+    unexpected = sorted(set(options) - allowed)
+    if unexpected:
+        raise ConfigurationError(
+            f"{prefix.replace('_', ' ')} locator does not support: "
+            + ", ".join(unexpected)
+        )
+    if locator == "fixed" and "values" not in options:
+        raise ConfigurationError("fixed locator requires a non-empty values array")
+    normalized = dict(options)
+
+    for key in ("interval", "month", "day", "nbins", "min_n_ticks", "numticks"):
+        if key not in normalized:
+            continue
+        value = normalized[key]
+        if isinstance(value, bool):
+            raise ConfigurationError(f"locator option {key} must be a positive integer")
+        try:
+            value = int(value)
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError(
+                f"locator option {key} must be a positive integer"
+            ) from error
+        if value < 1:
+            raise ConfigurationError(f"locator option {key} must be a positive integer")
+        normalized[key] = value
+    if "month" in normalized and normalized["month"] > 12:
+        raise ConfigurationError("locator option month must be between 1 and 12")
+    if "day" in normalized and normalized["day"] > 31:
+        raise ConfigurationError("locator option day must be between 1 and 31")
+
+    ranges = {
+        "bymonth": (1, 12),
+        "bymonthday": (1, 31),
+        "byhour": (0, 23),
+        "byminute": (0, 59),
+        "bysecond": (0, 59),
+    }
+    for key, (lower, upper) in ranges.items():
+        if key not in normalized:
+            continue
+        raw_values = normalized[key]
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        if not values or any(isinstance(value, bool) for value in values):
+            raise ConfigurationError(f"locator option {key} must contain integers")
+        try:
+            converted = [int(value) for value in values]
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError(
+                f"locator option {key} must contain integers"
+            ) from error
+        if any(value < lower or value > upper for value in converted):
+            raise ConfigurationError(
+                f"locator option {key} values must be between {lower} and {upper}"
+            )
+        normalized[key] = converted
+
+    if "byweekday" in normalized:
+        weekday_names = {
+            "mo": 0,
+            "mon": 0,
+            "monday": 0,
+            "tu": 1,
+            "tue": 1,
+            "tuesday": 1,
+            "we": 2,
+            "wed": 2,
+            "wednesday": 2,
+            "th": 3,
+            "thu": 3,
+            "thursday": 3,
+            "fr": 4,
+            "fri": 4,
+            "friday": 4,
+            "sa": 5,
+            "sat": 5,
+            "saturday": 5,
+            "su": 6,
+            "sun": 6,
+            "sunday": 6,
+        }
+        raw_values = normalized["byweekday"]
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        if not values:
+            raise ConfigurationError(
+                "locator option byweekday must contain weekdays or integers 0-6"
+            )
+        converted = []
+        for value in values:
+            try:
+                weekday = (
+                    weekday_names[str(value).strip().lower()]
+                    if isinstance(value, str) and not value.strip().isdigit()
+                    else int(value)
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise ConfigurationError(
+                    "locator option byweekday must contain weekdays or integers 0-6"
+                ) from error
+            if not 0 <= weekday <= 6:
+                raise ConfigurationError(
+                    "locator option byweekday must contain weekdays or integers 0-6"
+                )
+            converted.append(weekday)
+        normalized["byweekday"] = converted
+
+    for key in ("base", "offset"):
+        if key not in normalized:
+            continue
+        try:
+            value = float(normalized[key])
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError(f"locator option {key} must be finite") from error
+        if not math.isfinite(value) or (key == "base" and value <= 0):
+            raise ConfigurationError(
+                f"locator option {key} must be "
+                + ("positive" if key == "base" else "finite")
+            )
+        normalized[key] = value
+    for key in ("steps", "subs", "values"):
+        if key not in normalized:
+            continue
+        values = normalized[key]
+        if not isinstance(values, list) or not values:
+            raise ConfigurationError(f"locator option {key} must be a non-empty array")
+        try:
+            converted = [float(value) for value in values]
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError(
+                f"locator option {key} must contain numbers"
+            ) from error
+        if not all(math.isfinite(value) for value in converted):
+            raise ConfigurationError(f"locator option {key} must contain finite numbers")
+        normalized[key] = converted
+    for key in ("integer", "symmetric"):
+        if key in normalized and not isinstance(normalized[key], bool):
+            raise ConfigurationError(f"locator option {key} must be true or false")
+    if "prune" in normalized and normalized["prune"] not in {None, "lower", "upper", "both"}:
+        raise ConfigurationError("locator option prune must be lower, upper, both, or null")
+
+    tick_format = axes.get(f"{prefix}_tick_format", "")
+    if not isinstance(tick_format, str) or len(tick_format) > 100:
+        raise ConfigurationError(
+            f"{prefix.replace('_', ' ')} tick format must be a string of at most 100 characters"
+        )
+    axes[f"{prefix}_locator"] = locator
+    axes[f"{prefix}_locator_options"] = normalized
+    axes[f"{prefix}_tick_format"] = tick_format
+
+
 def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ConfigurationError("configuration must be an object")
@@ -656,6 +885,28 @@ def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
     if len(datetime_format) > 100:
         raise ConfigurationError("datetime tick format must be at most 100 characters")
     axes["x_datetime_format"] = datetime_format
+    provided_axes = raw.get("axes", {})
+    if "x_major_locator" not in provided_axes:
+        legacy_locator = {
+            "week": "weekday",
+        }.get(datetime_tick_unit, datetime_tick_unit)
+        axes["x_major_locator"] = legacy_locator
+        axes["x_major_locator_options"] = (
+            {"interval": datetime_tick_interval}
+            if legacy_locator not in {"auto", "none"}
+            else {}
+        )
+    if "x_major_tick_format" not in provided_axes:
+        axes["x_major_tick_format"] = datetime_format
+    for prefix in (
+        "x_major",
+        "x_minor",
+        "y_major",
+        "y_minor",
+        "secondary_y_major",
+        "secondary_y_minor",
+    ):
+        _validate_tick_locator(axes, prefix)
     try:
         grid_alpha = float(axes.get("grid_alpha", 0.5))
     except (TypeError, ValueError) as error:
@@ -1419,12 +1670,12 @@ def build_figure(
             axis.yaxis.set_major_formatter(mticker.EngFormatter(sep=""))
     for axis in primary_axes:
         _y_ticks(axis, axes)
-        _minor_y_ticks(axis, axes["minor_y_ticks"])
+        _minor_y_ticks(axis, axes)
     if secondary is not None and axes["secondary_y_engineering"]:
         secondary.yaxis.set_major_formatter(mticker.EngFormatter(sep=""))
     if secondary is not None:
         _y_ticks(secondary, axes, secondary=True)
-        _minor_y_ticks(secondary, axes["secondary_minor_y_ticks"])
+        _minor_y_ticks(secondary, axes, secondary=True)
     for axis in primary_axes:
         axis.tick_params(axis="both", which="both", labelsize=tick_font_size)
     if secondary is not None:
@@ -1783,10 +2034,12 @@ def _ticks(
         ax.xaxis.set_minor_locator(mticker.NullLocator())
         return
     ticks = axes["custom_x_ticks"]
+    fixed_major_ticks = bool(ticks)
     if ticks:
         labels = axes["custom_x_tick_labels"] or [str(value) for value in ticks]
         ax.set_xticks(ticks, labels)
     elif axes.get("x_value_ticks", False) and x_values:
+        fixed_major_ticks = True
         values = list(dict.fromkeys(x_values))
         interval = int(axes.get("x_value_tick_interval", 1))
         selected_indices = list(range(0, len(values), interval))
@@ -1795,25 +2048,31 @@ def _ticks(
             ax.set_xticks(selected_indices, [str(value) for value in selected_values])
         else:
             ax.set_xticks(selected_values, [str(value) for value in selected_values])
-    elif time_binned:
-        locator = _datetime_tick_locator(axes)
-        ax.xaxis.set_major_locator(locator)
-        datetime_format = axes.get("x_datetime_format", "")
-        ax.xaxis.set_major_formatter(
-            mdates.DateFormatter(datetime_format)
-            if datetime_format
-            else mdates.ConciseDateFormatter(locator)
+    else:
+        _apply_tick_locator(
+            ax.xaxis,
+            axes,
+            "x_major",
+            axes["xscale"],
+            date_auto=time_binned,
         )
-    elif axes["x_engineering"]:
+    if (
+        axes["x_engineering"]
+        and not fixed_major_ticks
+        and not axes.get("x_major_tick_format")
+        and axes.get("x_major_locator") not in DATE_TICK_LOCATORS
+        and not time_binned
+    ):
         ax.xaxis.set_major_formatter(mticker.EngFormatter(sep=""))
     if axes["minor_x_ticks"]:
-        locator = (
-            mticker.LogLocator(base=10, subs=tuple(range(2, 10)))
-            if axes["xscale"] == "log"
-            else mticker.AutoMinorLocator()
+        _apply_tick_locator(
+            ax.xaxis,
+            axes,
+            "x_minor",
+            axes["xscale"],
+            minor=True,
+            date_auto=time_binned,
         )
-        ax.xaxis.set_minor_locator(locator)
-        ax.xaxis.set_minor_formatter(mticker.NullFormatter())
     else:
         ax.xaxis.set_minor_locator(mticker.NullLocator())
     plt.setp(
@@ -1824,24 +2083,96 @@ def _ticks(
     )
 
 
-def _datetime_tick_locator(axes: dict[str, Any]):
-    unit = axes.get("x_datetime_tick_unit", "auto")
-    interval = int(axes.get("x_datetime_tick_interval", 1))
-    if unit == "year":
-        return mdates.YearLocator(base=interval)
-    if unit == "month":
-        return mdates.MonthLocator(interval=interval)
-    if unit == "week":
-        return mdates.WeekdayLocator(byweekday=mdates.MO, interval=interval)
-    if unit == "day":
-        return mdates.DayLocator(interval=interval)
-    if unit == "hour":
-        return mdates.HourLocator(interval=interval)
-    if unit == "minute":
-        return mdates.MinuteLocator(interval=interval)
-    if unit == "second":
-        return mdates.SecondLocator(interval=interval)
-    return mdates.AutoDateLocator(minticks=3, maxticks=10)
+def _tick_locator(
+    axes: dict[str, Any],
+    prefix: str,
+    scale: str,
+    *,
+    minor: bool = False,
+    date_auto: bool = False,
+) -> tuple[Any | None, bool]:
+    kind = axes.get(f"{prefix}_locator", "auto")
+    options = dict(axes.get(f"{prefix}_locator_options", {}))
+    interval = int(options.pop("interval", 1))
+    if kind == "none":
+        return mticker.NullLocator(), False
+    if kind == "auto":
+        if date_auto:
+            return mdates.AutoDateLocator(minticks=3, maxticks=20 if minor else 10), True
+        if minor:
+            return (
+                mticker.LogLocator(base=10, subs=tuple(range(2, 10)))
+                if scale == "log"
+                else mticker.AutoMinorLocator()
+            ), False
+        return None, False
+    if kind == "year":
+        base = int(options.pop("base", interval))
+        return mdates.YearLocator(base=base, **options), True
+    if kind == "month":
+        return mdates.MonthLocator(interval=interval, **options), True
+    if kind == "weekday":
+        weekdays = options.pop("byweekday", [0])
+        weekday_values = tuple(
+            (mdates.MO, mdates.TU, mdates.WE, mdates.TH, mdates.FR, mdates.SA, mdates.SU)[
+                value
+            ]
+            for value in weekdays
+        )
+        return mdates.WeekdayLocator(
+            byweekday=weekday_values, interval=interval, **options
+        ), True
+    if kind == "day":
+        return mdates.DayLocator(interval=interval, **options), True
+    if kind == "hour":
+        return mdates.HourLocator(interval=interval, **options), True
+    if kind == "minute":
+        return mdates.MinuteLocator(interval=interval, **options), True
+    if kind == "second":
+        return mdates.SecondLocator(interval=interval, **options), True
+    if kind == "microsecond":
+        return mdates.MicrosecondLocator(interval=interval), True
+    if kind == "multiple":
+        return mticker.MultipleLocator(**options), False
+    if kind == "max_n":
+        return mticker.MaxNLocator(**options), False
+    if kind == "log":
+        return mticker.LogLocator(**options), False
+    if kind == "fixed":
+        return mticker.FixedLocator(options["values"]), False
+    raise ConfigurationError(f"unsupported tick locator: {kind}")
+
+
+def _apply_tick_locator(
+    axis: Any,
+    axes: dict[str, Any],
+    prefix: str,
+    scale: str,
+    *,
+    minor: bool = False,
+    date_auto: bool = False,
+) -> None:
+    locator, is_date = _tick_locator(
+        axes, prefix, scale, minor=minor, date_auto=date_auto
+    )
+    if locator is not None:
+        (axis.set_minor_locator if minor else axis.set_major_locator)(locator)
+    tick_format = axes.get(f"{prefix}_tick_format", "")
+    formatter = None
+    if tick_format:
+        formatter = (
+            mdates.DateFormatter(tick_format)
+            if is_date
+            else mticker.StrMethodFormatter(tick_format)
+            if "{" in tick_format
+            else mticker.FormatStrFormatter(tick_format)
+        )
+    elif is_date and not minor and locator is not None:
+        formatter = mdates.ConciseDateFormatter(locator)
+    elif minor:
+        formatter = mticker.NullFormatter()
+    if formatter is not None:
+        (axis.set_minor_formatter if minor else axis.set_major_formatter)(formatter)
 
 
 def _y_ticks(ax, axes: dict[str, Any], secondary: bool = False) -> None:
@@ -1858,19 +2189,26 @@ def _y_ticks(ax, axes: dict[str, Any], secondary: bool = False) -> None:
         step = float(axes[f"{prefix}y_tick_step"])
         count = int((upper - lower) / step + 1e-12) + 1
         ticks = [lower + index * step for index in range(count)]
-    if not ticks:
+    if ticks:
+        ax.yaxis.set_major_locator(mticker.FixedLocator(ticks))
+        if labels:
+            ax.yaxis.set_major_formatter(mticker.FixedFormatter(labels))
         return
-    ax.yaxis.set_major_locator(mticker.FixedLocator(ticks))
-    if labels:
-        ax.yaxis.set_major_formatter(mticker.FixedFormatter(labels))
+    locator_prefix = "secondary_y_major" if secondary else "y_major"
+    scale = axes["secondary_yscale"] if secondary else axes["yscale"]
+    _apply_tick_locator(ax.yaxis, axes, locator_prefix, scale)
 
 
-def _minor_y_ticks(ax, enabled: bool) -> None:
+def _minor_y_ticks(
+    ax, axes: dict[str, Any], secondary: bool = False
+) -> None:
+    enabled = axes["secondary_minor_y_ticks" if secondary else "minor_y_ticks"]
     if enabled:
-        # Axis.minorticks_on selects a locator appropriate for the active scale
-        # (linear, log, symlog, or logit).
-        ax.yaxis.minorticks_on()
-        ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+        locator_prefix = "secondary_y_minor" if secondary else "y_minor"
+        scale = axes["secondary_yscale"] if secondary else axes["yscale"]
+        _apply_tick_locator(
+            ax.yaxis, axes, locator_prefix, scale, minor=True
+        )
     else:
         ax.yaxis.set_minor_locator(mticker.NullLocator())
 

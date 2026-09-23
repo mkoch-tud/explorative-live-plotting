@@ -221,16 +221,25 @@ This remains part of the lazy query, so raw rows are not collected in the UI.
 Enable **Break on missing time bin** to leave gaps in line, step, and area plots
 when one or more intervals contain no rows; it is disabled by default and does
 not change the aggregated values.
-Time-binned plots automatically use date-aware ticks that adapt from dates down
-to hours, minutes, seconds, and fractions as appropriate for the visible span.
-Set **Datetime tick format** to override those automatic labels with a Python
-`strftime` pattern. For example, `%b %d` produces `Apr 01`, `%b %d, %Y`
-produces `Apr 01, 2026`, and `%Y-%m-%d %H:%M` includes date, hour, and minute.
-Set **Datetime major tick unit** to `month` and **Calendar interval** to `2` or
-`3` to label every second or third month. The available fixed calendar units
-are year, month, week, day, hour, minute, and second; `auto` retains adaptive
-tick placement. In JSON these settings are `x_datetime_tick_unit` and
-`x_datetime_tick_interval` within `axes`.
+Time-binned plots automatically use date-aware ticks that adapt to the visible
+span. **Tick locators** lets you configure major and minor ticks independently
+for X, primary Y, and secondary Y. Choose a calendar locator (`year`, `month`,
+`weekday`, `day`, `hour`, `minute`, `second`, or `microsecond`) or a numeric
+locator (`multiple`, `max_n`, `log`, or `fixed`). `auto` retains adaptive
+placement and `none` disables that locator. Enable the corresponding minor-tick
+checkbox before a minor locator takes effect.
+
+Selecting a locator in the UI reveals only its supported attributes. In saved
+JSON, for example, an X major `month` locator with
+`{"bymonth":[1,4,7,10]}` labels January, April, July, and October, while an X
+minor `weekday` locator with `{"byweekday":["monday","friday"],"interval":2}`
+selects weekdays and an interval. Calendar options also include `month`, `day`,
+`bymonthday`, `byhour`, `byminute`, and `bysecond`, depending on the selected
+locator. Numeric options include `base`, `offset`, `nbins`, `steps`, `subs`,
+`numticks`, and `values`. The optional format accepts a Python `strftime`
+pattern for calendar locators or a numeric format such as `{x:.1f}`. For
+example, `%b-%y` produces `Apr-26`. Explicit custom ticks take precedence over
+locators.
 Common fields are `%Y` (year), `%y` (short year), `%b`/`%B` (abbreviated/full
 month), `%m` (numeric month), `%d` (day), and `%H:%M:%S` (time). The browser
 shows this reference next to the setting.
