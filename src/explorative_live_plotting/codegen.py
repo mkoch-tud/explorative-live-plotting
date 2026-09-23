@@ -691,7 +691,8 @@ def _ticks(ax, axes, time_binned=False, x_values=None):
         and not fixed_major_ticks
         and not axes.get("x_major_tick_format")
         and axes.get("x_major_locator") not in {
-            "year", "month", "weekday", "day", "hour", "minute", "second", "microsecond"
+            "year", "month", "weekday", "day", "hour", "minute", "second",
+            "microsecond", "date_range"
         }
         and not time_binned
     ):
@@ -749,6 +750,18 @@ def _tick_locator(axes, prefix, scale, minor=False, date_auto=False):
         return mdates.SecondLocator(interval=interval, **options), True
     if kind == "microsecond":
         return mdates.MicrosecondLocator(interval=interval), True
+    if kind == "date_range":
+        start = float(mdates.date2num(datetime.datetime.fromisoformat(
+            str(options["start"]).replace("Z", "+00:00")
+        )))
+        end = float(mdates.date2num(datetime.datetime.fromisoformat(
+            str(options["end"]).replace("Z", "+00:00")
+        )))
+        count = int(options.get("count", 6))
+        step = (end - start) / (count - 1)
+        return mticker.FixedLocator(
+            [start + index * step for index in range(count)]
+        ), True
     if kind == "multiple":
         return mticker.MultipleLocator(**options), False
     if kind == "max_n":

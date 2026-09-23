@@ -44,6 +44,7 @@ TICK_LOCATORS = {
     "minute",
     "second",
     "microsecond",
+    "date_range",
     "multiple",
     "max_n",
     "log",
@@ -58,6 +59,7 @@ DATE_TICK_LOCATORS = {
     "minute",
     "second",
     "microsecond",
+    "date_range",
 }
 TICK_LOCATOR_ALIASES = {
     "yearly": "year",
@@ -637,6 +639,7 @@ def _validate_tick_locator(axes: dict[str, Any], prefix: str) -> None:
         "minute": {"interval", "byminute"},
         "second": {"interval", "bysecond"},
         "microsecond": {"interval"},
+        "date_range": {"start", "end", "count"},
         "multiple": {"base", "offset"},
         "max_n": {"nbins", "steps", "integer", "symmetric", "prune", "min_n_ticks"},
         "log": {"base", "subs", "numticks"},
@@ -652,7 +655,15 @@ def _validate_tick_locator(axes: dict[str, Any], prefix: str) -> None:
         raise ConfigurationError("fixed locator requires a non-empty values array")
     normalized = dict(options)
 
-    for key in ("interval", "month", "day", "nbins", "min_n_ticks", "numticks"):
+    for key in (
+        "interval",
+        "month",
+        "day",
+        "count",
+        "nbins",
+        "min_n_ticks",
+        "numticks",
+    ):
         if key not in normalized:
             continue
         value = normalized[key]
@@ -671,6 +682,30 @@ def _validate_tick_locator(axes: dict[str, Any], prefix: str) -> None:
         raise ConfigurationError("locator option month must be between 1 and 12")
     if "day" in normalized and normalized["day"] > 31:
         raise ConfigurationError("locator option day must be between 1 and 31")
+    if locator == "date_range":
+        if "start" not in normalized or "end" not in normalized:
+            raise ConfigurationError("date range locator requires start and end values")
+        normalized.setdefault("count", 6)
+        if normalized["count"] < 2:
+            raise ConfigurationError("date range locator count must be at least 2")
+        coordinates = []
+        for key in ("start", "end"):
+            value = normalized[key]
+            if not isinstance(value, str) or not value.strip() or len(value) > 100:
+                raise ConfigurationError(
+                    f"date range locator {key} must be an ISO date or timestamp"
+                )
+            value = value.strip()
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                coordinates.append(float(mdates.date2num(parsed)))
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ConfigurationError(
+                    f"date range locator {key} must be an ISO date or timestamp"
+                ) from error
+            normalized[key] = value
+        if coordinates[1] <= coordinates[0]:
+            raise ConfigurationError("date range locator end must be after start")
 
     ranges = {
         "bymonth": (1, 12),
@@ -2132,6 +2167,20 @@ def _tick_locator(
         return mdates.SecondLocator(interval=interval, **options), True
     if kind == "microsecond":
         return mdates.MicrosecondLocator(interval=interval), True
+    if kind == "date_range":
+        start = float(
+            mdates.date2num(
+                datetime.fromisoformat(str(options["start"]).replace("Z", "+00:00"))
+            )
+        )
+        end = float(
+            mdates.date2num(
+                datetime.fromisoformat(str(options["end"]).replace("Z", "+00:00"))
+            )
+        )
+        count = int(options.get("count", 6))
+        step = (end - start) / (count - 1)
+        return mticker.FixedLocator([start + index * step for index in range(count)]), True
     if kind == "multiple":
         return mticker.MultipleLocator(**options), False
     if kind == "max_n":

@@ -28,7 +28,8 @@ const ANNOTATION_NUDGE_UNITS = [
 const TICK_LOCATOR_TYPES = [
   ['auto', 'auto'], ['none', 'none'], ['year', 'yearly'], ['month', 'monthly'],
   ['weekday', 'weekly / weekday'], ['day', 'daily'], ['hour', 'hourly'], ['minute', 'every minute'],
-  ['second', 'every second'], ['microsecond', 'every microsecond'], ['multiple', 'numeric multiple'],
+  ['second', 'every second'], ['microsecond', 'every microsecond'], ['date_range', 'even date range'],
+  ['multiple', 'numeric multiple'],
   ['max_n', 'numeric max-N'], ['log', 'logarithmic'], ['fixed', 'fixed values'],
 ];
 const TICK_LOCATOR_OPTIONS = {
@@ -41,6 +42,7 @@ const TICK_LOCATOR_OPTIONS = {
   minute: [['interval', 'Interval', 'integer'], ['byminute', 'Minutes (0–59)', 'integer-list']],
   second: [['interval', 'Interval', 'integer'], ['bysecond', 'Seconds (0–59)', 'integer-list']],
   microsecond: [['interval', 'Interval', 'integer']],
+  date_range: [['start', 'Start (ISO)', 'datetime'], ['end', 'End (ISO)', 'datetime'], ['count', 'Number of ticks', 'integer']],
   multiple: [['base', 'Multiple', 'number'], ['offset', 'Offset', 'number']],
   max_n: [['nbins', 'Maximum bins', 'integer'], ['steps', 'Allowed steps', 'number-list'], ['integer', 'Integer ticks', 'boolean'], ['symmetric', 'Symmetric', 'boolean'], ['prune', 'Prune edge', 'prune'], ['min_n_ticks', 'Minimum ticks', 'integer']],
   log: [['base', 'Base', 'number'], ['subs', 'Subdivisions', 'number-list'], ['numticks', 'Maximum ticks', 'integer']],
@@ -674,7 +676,7 @@ function renderTickLocatorEditors() {
         const displayed = Array.isArray(value) ? value.join(', ') : (value ?? '');
         const inputType = ['integer', 'number'].includes(type) ? 'number' : 'text';
         const step = type === 'integer' ? '1' : 'any';
-        const placeholder = key === 'byweekday' ? 'monday, friday or 0, 4' : type.endsWith('-list') ? 'comma-separated' : '';
+        const placeholder = key === 'byweekday' ? 'monday, friday or 0, 4' : key === 'start' ? '2024-01-01' : key === 'end' ? '2026-08-01' : type.endsWith('-list') ? 'comma-separated' : '';
         return `<label class="locator-option">${optionLabel}<input data-key="${key}" data-type="${type}" type="${inputType}" step="${step}" value="${escapeHtml(displayed)}" placeholder="${placeholder}"></label>`;
       }).join('');
       return `<fieldset class="tick-locator" data-prefix="${prefix}"><legend>${label}</legend><label>Locator<select class="locator-type">${TICK_LOCATOR_TYPES.map(([value, text]) => `<option value="${value}" ${value === locator ? 'selected' : ''}>${text}</option>`).join('')}</select></label>${optionFields ? `<div class="locator-options grid">${optionFields}</div>` : ''}<label><span>Date/numeric format (optional) ${info('Calendar locators use strftime fields such as %Y, %b, %m, %d, and %H:%M:%S. Numeric locators accept formats such as {x:.1f}.')}</span><input class="locator-format" value="${escapeHtml(format)}" placeholder="%b-%y or {x:.1f}"></label></fieldset>`;

@@ -224,8 +224,9 @@ not change the aggregated values.
 Time-binned plots automatically use date-aware ticks that adapt to the visible
 span. **Tick locators** lets you configure major and minor ticks independently
 for X, primary Y, and secondary Y. Choose a calendar locator (`year`, `month`,
-`weekday`, `day`, `hour`, `minute`, `second`, or `microsecond`) or a numeric
-locator (`multiple`, `max_n`, `log`, or `fixed`). `auto` retains adaptive
+`weekday`, `day`, `hour`, `minute`, `second`, or `microsecond`), an evenly
+spaced `date_range`, or a numeric locator (`multiple`, `max_n`, `log`, or
+`fixed`). `auto` retains adaptive
 placement and `none` disables that locator. Enable the corresponding minor-tick
 checkbox before a minor locator takes effect.
 
@@ -240,6 +241,12 @@ locator. Numeric options include `base`, `offset`, `nbins`, `steps`, `subs`,
 pattern for calendar locators or a numeric format such as `{x:.1f}`. For
 example, `%b-%y` produces `Apr-26`. Explicit custom ticks take precedence over
 locators.
+
+Choose **even date range** to include a precise start and end date with a
+configurable number of evenly spaced ticks. For example, start `2024-01-01`,
+end `2026-08-01`, and count `6` creates six ticks including both endpoints.
+Spacing is based on elapsed time, so intermediate ticks need not fall on the
+first day of a calendar month.
 Common fields are `%Y` (year), `%y` (short year), `%b`/`%B` (abbreviated/full
 month), `%m` (numeric month), `%d` (day), and `%H:%M:%S` (time). The browser
 shows this reference next to the setting.
