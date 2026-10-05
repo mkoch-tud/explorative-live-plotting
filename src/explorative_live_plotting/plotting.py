@@ -549,6 +549,9 @@ def _migrate_legacy_line(
         "break_on_missing_time_bin": bool(
             raw.get("break_on_missing_time_bin", False)
         ),
+        "fill_missing_time_bins_with_zero": bool(
+            raw.get("fill_missing_time_bins_with_zero", False)
+        ),
         "filter_logic": raw.get("filter_logic", "and"),
         "required_filters": required_filters,
         "filters": filters,
@@ -1011,6 +1014,7 @@ def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
         layer["break_on_missing_time_bin"] = bool(
             layer.get("break_on_missing_time_bin", False)
         )
+        layer.setdefault("fill_missing_time_bins_with_zero", False)
     x_anchors = [layer for layer in config["layers"] if layer["fix_x_values"]]
     if len(x_anchors) > 1:
         raise ConfigurationError("only one layer can fix the shared X values")

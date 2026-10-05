@@ -229,6 +229,10 @@ def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema:
                 selections.append(f"pl.col({group_column!r}).cast(pl.String).alias('_group')")
             selections.append("pl.col('_y')")
             lines.append(f"    {variable} = {variable}.select([{', '.join(selections)}])")
+    if layer["fill_missing_time_bins_with_zero"] and layer["time_bin"]:
+        lines.append(
+            f"    {variable} = _fill_missing_time_bins({variable}, {layer['time_bin']!r})"
+        )
     if layer["result_y_min"] is not None:
         lines.append(
             f"    {variable} = {variable}.filter("
@@ -417,6 +421,35 @@ def _groups(frame):
         return [(None, frame)]
     values = frame.get_column("_group").drop_nulls().unique(maintain_order=True).to_list()
     return [(str(value), frame.filter(pl.col("_group") == value)) for value in values]
+
+
+def _fill_missing_time_bins(lazy, time_bin):
+    schema = lazy.collect_schema()
+    dtype = schema["_x"]
+    range_options = {"interval": time_bin}
+    if dtype == pl.Date:
+        ranges = pl.date_ranges
+    else:
+        ranges = pl.datetime_ranges
+        range_options.update(time_unit=dtype.time_unit, time_zone=dtype.time_zone)
+    domain = lazy.select(
+        ranges(pl.col("_x").min(), pl.col("_x").max(), **range_options).alias("_x")
+    ).explode("_x").drop_nulls("_x")
+    keys = ["_x"]
+    if "_group" in schema:
+        domain = domain.join(lazy.select("_group").unique(), how="cross")
+        keys.append("_group")
+    return (
+        domain.join(
+            lazy.with_columns(pl.lit(True).alias("_present")),
+            on=keys, how="left", nulls_equal=True,
+        )
+        .with_columns(
+            pl.when(pl.col("_present").is_null()).then(0).otherwise(pl.col("_y")).alias("_y")
+        )
+        .drop("_present")
+        .sort(keys)
+    )
 
 
 def _plot_style(style):

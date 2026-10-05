@@ -50,6 +50,7 @@ QUERY_FIELDS = (
     "aggregation_options",
     "time_bin",
     "time_bin_start_by",
+    "fill_missing_time_bins_with_zero",
     "filter_logic",
     "base_filter_expression",
     "filter_expression",
@@ -62,6 +63,36 @@ QUERY_FIELDS = (
     "result_y_max",
     "fixed_x_values",
 )
+
+
+def _fill_missing_time_bins(lazy: pl.LazyFrame, time_bin: str) -> pl.LazyFrame:
+    """Complete each series over the layer's time span, preserving existing nulls."""
+    schema = lazy.collect_schema()
+    dtype = schema["_x"]
+    range_options = {"interval": time_bin}
+    if dtype == pl.Date:
+        ranges = pl.date_ranges
+    else:
+        ranges = pl.datetime_ranges
+        range_options.update(time_unit=dtype.time_unit, time_zone=dtype.time_zone)
+    domain = lazy.select(
+        ranges(pl.col("_x").min(), pl.col("_x").max(), **range_options).alias("_x")
+    ).explode("_x").drop_nulls("_x")
+    keys = ["_x"]
+    if "_group" in schema:
+        domain = domain.join(lazy.select("_group").unique(), how="cross")
+        keys.append("_group")
+    return (
+        domain.join(
+            lazy.with_columns(pl.lit(True).alias("_present")),
+            on=keys, how="left", nulls_equal=True,
+        )
+        .with_columns(
+            pl.when(pl.col("_present").is_null()).then(0).otherwise(pl.col("_y")).alias("_y")
+        )
+        .drop("_present")
+        .sort(keys)
+    )
 
 
 def _coerce(value: Any, dtype: pl.DataType, field: str) -> Any:
@@ -207,6 +238,11 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
     break_on_missing_time_bin = raw.get("break_on_missing_time_bin", False)
     if not isinstance(break_on_missing_time_bin, bool):
         raise ConfigurationError("break on missing time bin must be true or false")
+    fill_missing_time_bins_with_zero = raw.get("fill_missing_time_bins_with_zero", False)
+    if not isinstance(fill_missing_time_bins_with_zero, bool):
+        raise ConfigurationError("fill missing time bins with zero must be true or false")
+    if break_on_missing_time_bin and fill_missing_time_bins_with_zero:
+        raise ConfigurationError("choose either break on missing time bin or fill with zero")
     if plot_type not in {"histogram", "box", "violin"} and x_column is None:
         raise ConfigurationError(f"{plot_type} requires an x column")
     if aggregation not in {"count", "relative_count"} and y_column is None:
@@ -350,6 +386,7 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
         "time_bin": time_bin,
         "time_bin_start_by": time_bin_start_by,
         "break_on_missing_time_bin": break_on_missing_time_bin,
+        "fill_missing_time_bins_with_zero": fill_missing_time_bins_with_zero,
         "filter_logic": filter_logic,
         "base_filter_expression": base_filter_expression,
         "filter_expression": filter_expression,
@@ -470,6 +507,8 @@ class QueryEngine:
                 y_column, layer["aggregation_options"]
             ).alias("_y")
             lazy = self._aggregate(lazy, layer, aggregation)
+        if layer["fill_missing_time_bins_with_zero"] and layer["time_bin"]:
+            lazy = _fill_missing_time_bins(lazy, layer["time_bin"])
         if layer["result_y_min"] is not None:
             lazy = lazy.filter(pl.col("_y") >= layer["result_y_min"])
         if layer["result_y_max"] is not None:

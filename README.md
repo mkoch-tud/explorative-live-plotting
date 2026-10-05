@@ -221,6 +221,14 @@ This remains part of the lazy query, so raw rows are not collected in the UI.
 Enable **Break on missing time bin** to leave gaps in line, step, and area plots
 when one or more intervals contain no rows; it is disabled by default and does
 not change the aggregated values.
+Enable **Fill missing time bins with 0** instead to add a zero for each empty
+interval between the layer's first and last bins, keeping the line continuous.
+When splitting series, every series uses that same time span. Existing values,
+including null aggregates in bins that contain rows, are preserved. The setting
+defaults to off and is saved as `"fill_missing_time_bins_with_zero": true`.
+Zero filling happens before result filters, sorting, and result limits, and is
+also included in exported Python scripts. Selecting either missing-bin option
+turns off the other.
 Time-binned plots automatically use date-aware ticks that adapt to the visible
 span. **Tick locators** lets you configure major and minor ticks independently
 for X, primary Y, and secondary Y. Choose a calendar locator (`year`, `month`,
