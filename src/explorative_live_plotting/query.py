@@ -284,6 +284,41 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
     if not isinstance(raw_aggregation_options, dict):
         raise ConfigurationError("aggregation options must be a JSON object")
     aggregation_options = dict(raw_aggregation_options)
+    if aggregation in {"relative_count", "relative_value"}:
+        denominator_source = aggregation_options.get("denominator_source") or None
+        if denominator_source is not None and not isinstance(denominator_source, str):
+            raise ConfigurationError(f"{aggregation} denominator source must be a source name")
+        denominator_schema = catalog.schema(denominator_source) if denominator_source else schema
+        if denominator_source:
+            denominator_x = aggregation_options.get("denominator_x_column") or x_column
+            denominator_group = aggregation_options.get("denominator_group_column") or None
+            if x_column is not None:
+                if denominator_x not in denominator_schema:
+                    raise ConfigurationError(f"{aggregation} denominator X column does not exist")
+                numerator_dtype = schema[x_column]
+                denominator_dtype = denominator_schema[denominator_x]
+                numerator_temporal = numerator_dtype == pl.Date or isinstance(
+                    numerator_dtype, pl.Datetime
+                )
+                denominator_temporal = denominator_dtype == pl.Date or isinstance(
+                    denominator_dtype, pl.Datetime
+                )
+                if time_bin and not denominator_temporal:
+                    raise ConfigurationError(f"{aggregation} denominator X must be a date or datetime")
+                if not (numerator_temporal and denominator_temporal) and (
+                    numerator_dtype != denominator_dtype
+                ):
+                    raise ConfigurationError(f"{aggregation} X columns must have compatible types")
+            if denominator_group and (
+                not group_column or denominator_group not in denominator_schema
+            ):
+                raise ConfigurationError(
+                    f"{aggregation} denominator split column requires a numerator split "
+                    "and must exist in the denominator source"
+                )
+            aggregation_options["denominator_x_column"] = denominator_x
+            aggregation_options["denominator_group_column"] = denominator_group
+        aggregation_options["denominator_source"] = denominator_source
     if aggregation == "relative_count":
         scale = aggregation_options.get("scale", "fraction")
         if scale not in {"fraction", "percent"}:
@@ -296,10 +331,6 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
             or value_aggregation in {"none", "relative_count", "relative_value"}
         ):
             raise ConfigurationError("relative_value requires a non-relative value aggregation")
-        denominator_source = aggregation_options.get("denominator_source") or None
-        if denominator_source is not None and not isinstance(denominator_source, str):
-            raise ConfigurationError("relative_value denominator source must be a source name")
-        denominator_schema = catalog.schema(denominator_source) if denominator_source else schema
         denominator = aggregation_options.get("denominator")
         if value_aggregation != "count" and (not isinstance(denominator, str) or not denominator):
             raise ConfigurationError(
@@ -316,36 +347,6 @@ def validate_layer(raw: Any, catalog: DataCatalog, registry: Registry) -> dict[s
             raise ConfigurationError("relative_value requires a numeric Y column")
         if value_aggregation not in {"count", "n_unique"} and not denominator_schema[denominator].is_numeric():
             raise ConfigurationError("relative_value requires a numeric denominator column")
-        if denominator_source:
-            denominator_x = aggregation_options.get("denominator_x_column") or x_column
-            denominator_group = aggregation_options.get("denominator_group_column") or None
-            if x_column is not None:
-                if denominator_x not in denominator_schema:
-                    raise ConfigurationError("relative_value denominator X column does not exist")
-                numerator_dtype = schema[x_column]
-                denominator_dtype = denominator_schema[denominator_x]
-                numerator_temporal = numerator_dtype == pl.Date or isinstance(
-                    numerator_dtype, pl.Datetime
-                )
-                denominator_temporal = denominator_dtype == pl.Date or isinstance(
-                    denominator_dtype, pl.Datetime
-                )
-                if time_bin and not denominator_temporal:
-                    raise ConfigurationError("relative_value denominator X must be a date or datetime")
-                if not (numerator_temporal and denominator_temporal) and (
-                    numerator_dtype != denominator_dtype
-                ):
-                    raise ConfigurationError("relative_value X columns must have compatible types")
-            if denominator_group and (
-                not group_column or denominator_group not in denominator_schema
-            ):
-                raise ConfigurationError(
-                    "relative_value denominator split column requires a numerator split "
-                    "and must exist in the denominator source"
-                )
-            aggregation_options["denominator_x_column"] = denominator_x
-            aggregation_options["denominator_group_column"] = denominator_group
-        aggregation_options["denominator_source"] = denominator_source
         aggregation_options["value_aggregation"] = value_aggregation
         scale = aggregation_options.get("scale", "fraction")
         if scale not in {"fraction", "percent"}:
@@ -482,7 +483,7 @@ class QueryEngine:
             "max_plot_rows": MAX_PLOT_ROWS,
         }
         denominator_source = layer["aggregation_options"].get("denominator_source")
-        if layer["aggregation"] == "relative_value" and denominator_source:
+        if layer["aggregation"] in {"relative_count", "relative_value"} and denominator_source:
             payload["denominator_source"] = self.catalog.fingerprint(denominator_source)
         key = self.cache.key(payload)
 
@@ -560,7 +561,7 @@ class QueryEngine:
             ).alias("_y")
             lazy = self._aggregate(lazy, layer, aggregation)
         external_relative = (
-            layer["aggregation"] == "relative_value"
+            layer["aggregation"] in {"relative_count", "relative_value"}
             and layer["aggregation_options"].get("denominator_source")
         )
         if layer["fill_missing_time_bins_with_zero"] and layer["time_bin"] and not external_relative:
@@ -585,7 +586,13 @@ class QueryEngine:
             )
         elif sort != "none":
             column, descending = sort.split("_")
-            lazy = lazy.sort(f"_{column}", descending=descending == "descending", nulls_last=True)
+            if external_relative and layer["group_column"]:
+                lazy = lazy.sort(
+                    [f"_{column}", "_group"],
+                    descending=[descending == "descending", False], nulls_last=True,
+                )
+            else:
+                lazy = lazy.sort(f"_{column}", descending=descending == "descending", nulls_last=True)
         if layer["result_limit"] is not None:
             lazy = lazy.limit(layer["result_limit"])
         # Bound materialization before Matplotlib conversion. The extra row lets
@@ -649,6 +656,13 @@ class QueryEngine:
             return self._aggregate(lazy, layer, ratio)
 
         numerator_frame = self._aggregate(lazy, layer, numerator.alias("_y"))
+        return self._external_relative_ratio(numerator_frame, layer, denominator)
+
+    def _external_relative_ratio(
+        self, numerator_frame: pl.LazyFrame, layer: dict[str, Any], denominator: pl.Expr
+    ) -> pl.LazyFrame:
+        options = layer["aggregation_options"]
+        multiplier = 100.0 if options.get("scale") == "percent" else 1.0
         if layer["fill_missing_time_bins_with_zero"] and layer["time_bin"]:
             numerator_frame = _fill_missing_time_bins(numerator_frame, layer["time_bin"])
         denominator_base = self.catalog.lazy(options["denominator_source"])
@@ -676,18 +690,28 @@ class QueryEngine:
                 .alias("_y")
             )
             .drop("_denominator")
+            .sort(["_x", "_group"] if layer["group_column"] else ["_x"])
         )
 
-    @classmethod
     def _relative_count(
-        cls, base: pl.LazyFrame, filtered: pl.LazyFrame, layer: dict[str, Any]
+        self, base: pl.LazyFrame, filtered: pl.LazyFrame, layer: dict[str, Any]
     ) -> pl.LazyFrame:
         """Count filtered rows divided by all rows in each x/group bin."""
+        if layer["aggregation_options"]["denominator_source"]:
+            # Retain bins/series from the numerator's base rows even when its
+            # layer filters select no rows, matching same-source relative_count.
+            domain = self._aggregate(base, layer, pl.len().alias("_y")).drop("_y")
+            numerator = self._aggregate(filtered, layer, pl.len().alias("_y"))
+            keys = ["_x", "_group"] if layer["group_column"] else ["_x"]
+            numerator_frame = domain.join(
+                numerator, on=keys, how="left", nulls_equal=True
+            ).with_columns(pl.col("_y").fill_null(0))
+            return self._external_relative_ratio(numerator_frame, layer, pl.len())
         multiplier = 100.0 if layer["aggregation_options"].get("scale") == "percent" else 1.0
-        denominator, keys = cls._grouped(
+        denominator, keys = self._grouped(
             base, layer, pl.len().alias("_denominator")
         )
-        numerator, _ = cls._grouped(
+        numerator, _ = self._grouped(
             filtered, layer, pl.len().alias("_numerator")
         )
         if not keys:

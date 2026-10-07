@@ -181,7 +181,7 @@ def _query_code(
     y_column = layer["y_column"]
     group_column = layer["group_column"]
     external_relative = (
-        layer["aggregation"] == "relative_value"
+        layer["aggregation"] in {"relative_count", "relative_value"}
         and layer["aggregation_options"].get("denominator_source")
     )
     if layer["aggregation"] == "none":
@@ -197,10 +197,21 @@ def _query_code(
             lines.append(f"    {variable} = {variable}.with_row_index('_x', offset=1)")
     elif external_relative:
         options = layer["aggregation_options"]
-        inner_layer = {**layer, "aggregation": options["value_aggregation"]}
+        inner_layer = {
+            **layer, "aggregation": (
+                "count" if layer["aggregation"] == "relative_count" else options["value_aggregation"]
+            ),
+        }
         lines.extend(_relative_aggregate_code(
             variable, layer, _aggregation_code(inner_layer) + ".alias('_y')",
         ))
+        if layer["aggregation"] == "relative_count":
+            lines.extend(_relative_aggregate_code(all_variable, layer, "pl.len().alias('_y')"))
+            keys = ["_x", "_group"] if group_column else ["_x"]
+            lines.append(
+                f"    {variable} = {all_variable}.drop('_y').join({variable}, on={keys!r}, "
+                "how='left', nulls_equal=True).with_columns(pl.col('_y').fill_null(0))"
+            )
         if layer["fill_missing_time_bins_with_zero"] and layer["time_bin"]:
             lines.append(
                 f"    {variable} = _fill_missing_time_bins({variable}, {layer['time_bin']!r})"
@@ -225,13 +236,14 @@ def _query_code(
             f"    {denominator_variable} = {denominator_variable}.rename({{'_y': '_denominator'}})"
         )
         keys = ["_x", "_group"] if denominator_layer["group_column"] else ["_x"]
+        sort_keys = ["_x", "_group"] if group_column else ["_x"]
         multiplier = 100.0 if options.get("scale") == "percent" else 1.0
         lines.append(
             f"    {variable} = {variable}.join({denominator_variable}, on={keys!r}, "
             "how='left', nulls_equal=True).with_columns("
             "pl.when(pl.col('_denominator') != 0).then("
             f"pl.col('_y').cast(pl.Float64) / pl.col('_denominator') * {multiplier!r}"
-            ").otherwise(None).alias('_y')).drop('_denominator')"
+            f").otherwise(None).alias('_y')).drop('_denominator').sort({sort_keys!r})"
         )
     else:
         x_key = x_column
@@ -317,10 +329,16 @@ def _query_code(
         )
     if layer["sort"] != "none":
         column, descending = layer["sort"].split("_")
-        lines.append(
-            f"    {variable} = {variable}.sort('_{column}', "
-            f"descending={descending == 'descending'!r}, nulls_last=True)"
-        )
+        if external_relative and group_column:
+            lines.append(
+                f"    {variable} = {variable}.sort({[f'_{column}', '_group']!r}, "
+                f"descending={[descending == 'descending', False]!r}, nulls_last=True)"
+            )
+        else:
+            lines.append(
+                f"    {variable} = {variable}.sort('_{column}', "
+                f"descending={descending == 'descending'!r}, nulls_last=True)"
+            )
     if layer["result_limit"] is not None:
         lines.append(f"    {variable} = {variable}.limit({layer['result_limit']!r})")
     lines.append(f"    {variable} = {variable}.collect(engine='streaming')")
@@ -1010,7 +1028,7 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
     for layer in enabled_layers:
         if layer["source"] not in used_sources:
             used_sources.append(layer["source"])
-        if layer["aggregation"] == "relative_value":
+        if layer["aggregation"] in {"relative_count", "relative_value"}:
             denominator_source = layer["aggregation_options"]["denominator_source"]
             if denominator_source and denominator_source not in used_sources:
                 used_sources.append(denominator_source)
@@ -1110,7 +1128,7 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
         schema = catalog.schema(layer["source"])
         denominator_source = (
             layer["aggregation_options"].get("denominator_source")
-            if layer["aggregation"] == "relative_value" else None
+            if layer["aggregation"] in {"relative_count", "relative_value"} else None
         )
         query_blocks.append(_query_code(
             index, source_variables[layer["source"]], layer, schema,
