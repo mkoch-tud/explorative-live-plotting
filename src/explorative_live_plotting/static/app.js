@@ -902,6 +902,9 @@ function renderSources() {
       if (!workspace) return;
       workspace.bootstrap.sources = workspace.bootstrap.sources.filter(x => x.name !== item.name);
       workspace.config.layers = workspace.config.layers.filter(x => x.source !== item.name);
+      workspace.config.layers.forEach(layer => {
+        if (layer.aggregation === 'relative_value' && layer.aggregation_options?.denominator_source === item.name) layer.enabled = false;
+      });
       if (editingSourceName === item.name) clearSourceEditor();
       if (workspaceId !== activeWorkspaceId) return;
       bootstrap = workspace.bootstrap; config = workspace.config;
@@ -1084,6 +1087,20 @@ function renderLayers() {
     const groupLabel = card.querySelector('.group-column').closest('label');
     card.querySelector('.grouping-grid').appendChild(groupLabel);
     const groupingPanel = card.querySelector('.grouping-panel');
+    if (layer.aggregation === 'relative_value') {
+      const relativeOptions = layer.aggregation_options;
+      const denominatorColumns = columns(relativeOptions.denominator_source || layer.source);
+      const valueAggregations = aggregations.filter(value => !['relative_count', 'relative_value'].includes(value));
+      const countValues = relativeOptions.value_aggregation === 'count';
+      groupingPanel.insertAdjacentHTML('beforeend', `<div class="grid relative-value-options">
+        <label>Aggregate both values with<select class="relative-value-aggregation">${option(valueAggregations, relativeOptions.value_aggregation || 'sum')}</select></label>
+        <label>Denominator source<select class="denominator-source"><option value="">Same source</option>${option(names, relativeOptions.denominator_source)}</select></label>
+        <label>Denominator value column<select class="denominator-column" ${countValues ? 'disabled' : ''}>${option(denominatorColumns, relativeOptions.denominator, true)}</select></label>
+        <label ${relativeOptions.denominator_source ? '' : 'hidden'}>Denominator Time/X column<select class="denominator-x-column">${option(denominatorColumns, relativeOptions.denominator_x_column || layer.x_column, true)}</select></label>
+        <label ${relativeOptions.denominator_source && layer.group_column ? '' : 'hidden'}><span>Denominator split column ${info('Leave empty to divide every series by the total for its time bin. Select a column to match numerator and denominator series by their split values.')}</span><select class="denominator-group-column">${option(denominatorColumns, relativeOptions.denominator_group_column, true)}</select></label>
+        <label>Relative scale<select class="relative-scale">${option(['fraction', 'percent'], relativeOptions.scale || 'fraction')}</select></label>
+      </div><small>Both values use the same aggregation, time-bin width, and week anchor. With a separate denominator source, layer filters apply only to the numerator; the denominator uses its own source filter.</small>`);
+    }
     const advanced = document.createElement('details');
     advanced.className = 'layer-advanced';
     advanced.open = expandedAdvanced.has(String(layer.id));
@@ -1136,7 +1153,12 @@ function renderLayers() {
       ['.x-column', 'x_column', false], ['.y-column', 'y_column', false],
       ['.group-column', 'group_column', false], ['.sort', 'sort', false],
       ['.filter-logic', 'filter_logic', false],
-    ]) q(selector).onchange = event => { layer[key] = event.target.value; changed(!presentation); };
+    ]) q(selector).onchange = event => {
+      layer[key] = event.target.value;
+      if (key === 'group_column' && !layer[key]) delete layer.aggregation_options.denominator_group_column;
+      if (['group_column', 'x_column'].includes(key)) renderLayers();
+      changed(!presentation);
+    };
     q('.grouping-method').onchange = event => {
       if (event.target.value === 'none') { layer.aggregation = 'none'; layer.time_bin = null; }
       else {
@@ -1145,7 +1167,31 @@ function renderLayers() {
       }
       renderLayers(); changed(true);
     };
-    q('.aggregation').onchange = event => { layer.aggregation = event.target.value; changed(true); };
+    q('.aggregation').onchange = event => {
+      if (event.target.value === 'relative_value' && !['none', 'relative_count', 'relative_value'].includes(layer.aggregation)) {
+        layer.aggregation_options.value_aggregation = layer.aggregation;
+      }
+      layer.aggregation = event.target.value; renderLayers(); changed(true);
+    };
+    if (layer.aggregation === 'relative_value') {
+      for (const [selector, key] of [
+        ['.relative-value-aggregation', 'value_aggregation'],
+        ['.denominator-column', 'denominator'], ['.denominator-x-column', 'denominator_x_column'],
+        ['.denominator-group-column', 'denominator_group_column'], ['.relative-scale', 'scale'],
+      ]) q(selector).onchange = event => {
+        layer.aggregation_options[key] = event.target.value || null;
+        renderLayers(); changed(true);
+      };
+      q('.denominator-source').onchange = event => {
+        const options = layer.aggregation_options;
+        options.denominator_source = event.target.value || null;
+        const denominatorColumns = columns(options.denominator_source || layer.source);
+        if (!denominatorColumns.includes(options.denominator)) options.denominator = null;
+        options.denominator_x_column = denominatorColumns.includes(layer.x_column) ? layer.x_column : null;
+        options.denominator_group_column = null;
+        renderLayers(); changed(true);
+      };
+    }
     q('.time-bin').onchange = event => { layer.time_bin = event.target.value.trim() || '1m'; changed(true); };
     q('.time-bin-start-by').onchange = event => { layer.time_bin_start_by = event.target.value; changed(true); };
     q('.break-on-missing-time-bin').onchange = event => {
@@ -1186,7 +1232,7 @@ function renderLayers() {
       renderLayers(); changed(true);
     };
     q('.aggregation-options').onchange = event => {
-      try { layer.aggregation_options = JSON.parse(event.target.value); changed(true); }
+      try { layer.aggregation_options = JSON.parse(event.target.value); renderLayers(); changed(true); }
       catch { message('Invalid aggregation options JSON', true); }
     };
     q('.plot-options').onchange = event => {
@@ -1679,7 +1725,10 @@ $('add-source').onclick = async () => {
   if (!workspace) return;
   workspace.bootstrap.sources = workspace.bootstrap.sources.filter(item => item.name !== added.name && item.name !== previousName); workspace.bootstrap.sources.push(added);
   if (previousName && previousName !== added.name) {
-    workspace.config.layers.forEach(layer => { if (layer.source === previousName) layer.source = added.name; });
+    workspace.config.layers.forEach(layer => {
+      if (layer.source === previousName) layer.source = added.name;
+      if (layer.aggregation_options?.denominator_source === previousName) layer.aggregation_options.denominator_source = added.name;
+    });
   }
   workspace.queryDirty = true;
   if (workspaceId !== activeWorkspaceId) return;
@@ -1758,10 +1807,22 @@ async function loadConfigurationObject(loaded, description = 'Configuration') {
     if (!targetBootstrap.registry.plot_types.includes(layer.plot_type ?? 'line')) invalid.push(`unknown plot type ${layer.plot_type}`);
     if (!targetBootstrap.registry.aggregations.includes(layer.aggregation ?? 'none')) invalid.push(`unknown aggregation ${layer.aggregation}`);
     if (!['histogram', 'box', 'violin'].includes(layer.plot_type ?? 'line') && !layer.x_column) invalid.push('missing X-column selection');
-    if (!['count', 'relative_count'].includes(layer.aggregation ?? 'none') && !layer.y_column) invalid.push('missing Y-column selection');
+    const relativeCountValues = layer.aggregation === 'relative_value' && layer.aggregation_options?.value_aggregation === 'count';
+    if (!['count', 'relative_count'].includes(layer.aggregation ?? 'none') && !relativeCountValues && !layer.y_column) invalid.push('missing Y-column selection');
     if (layer.x_column && !layerColumns.has(layer.x_column)) invalid.push(`missing X column ${layer.x_column}`);
     if (layer.y_column && !layerColumns.has(layer.y_column)) invalid.push(`missing Y column ${layer.y_column}`);
     if (layer.group_column && !layerColumns.has(layer.group_column)) invalid.push(`missing split column ${layer.group_column}`);
+    if (layer.aggregation === 'relative_value' && layer.aggregation_options?.denominator_source) {
+      const options = layer.aggregation_options;
+      const denominatorMetadata = targetBootstrap.sources.find(item => item.name === options.denominator_source);
+      const denominatorColumns = new Set((denominatorMetadata?.columns ?? []).map(item => item.name));
+      if (!denominatorMetadata) invalid.push(`missing denominator source ${options.denominator_source}`);
+      else {
+        if (!relativeCountValues && !denominatorColumns.has(options.denominator)) invalid.push(`missing denominator value column ${options.denominator ?? '(none)'}`);
+        if (layer.x_column && !denominatorColumns.has(options.denominator_x_column || layer.x_column)) invalid.push('missing denominator X column');
+        if (options.denominator_group_column && !denominatorColumns.has(options.denominator_group_column)) invalid.push('missing denominator split column');
+      }
+    }
     for (const filter of filterConditions([...(layer.required_filters ?? []), ...(layer.filters ?? [])])) {
       if (filter?.column && !layerColumns.has(filter.column)) invalid.push(`missing filter column ${filter.column}`);
     }

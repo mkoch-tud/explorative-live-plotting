@@ -110,19 +110,49 @@ def _aggregation_code(layer: dict[str, Any]) -> str:
         quantile = float(layer["aggregation_options"].get("quantile", 0.5))
         return f"{column}.quantile({quantile!r})"
     if aggregation == "relative_value":
-        denominator = f"pl.col({layer['aggregation_options']['denominator']!r}).sum()"
+        inner_layer = {**layer, "aggregation": layer["aggregation_options"]["value_aggregation"]}
+        numerator = _aggregation_code(inner_layer)
+        denominator = _aggregation_code({
+            **inner_layer, "y_column": layer["aggregation_options"].get("denominator"),
+        })
         multiplier = (
             100.0 if layer["aggregation_options"].get("scale") == "percent" else 1.0
         )
         return (
             f"pl.when({denominator} != 0).then("
-            f"{column}.sum().cast(pl.Float64) / {denominator} * {multiplier!r}"
+            f"({numerator}).cast(pl.Float64) / {denominator} * {multiplier!r}"
             ").otherwise(None)"
         )
     return f"{column}.{aggregation}()"
 
 
-def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema: pl.Schema) -> str:
+def _relative_aggregate_code(variable: str, layer: dict[str, Any], expression: str) -> list[str]:
+    x_column, group_column = layer["x_column"], layer["group_column"]
+    keys = [column for column in (x_column, group_column) if column]
+    if not keys:
+        return [f"    {variable} = {variable}.select({expression}).with_row_index('_x', offset=1)"]
+    if layer["time_bin"]:
+        by = f", group_by={group_column!r}" if group_column else ""
+        grouping = (
+            f"sort({x_column!r}).group_by_dynamic({x_column!r}, "
+            f"every={layer['time_bin']!r}, start_by={layer['time_bin_start_by']!r}{by})"
+        )
+    else:
+        grouping = f"group_by({keys!r})"
+    selections = [f"pl.col({x_column!r}).alias('_x')"]
+    if group_column:
+        selections.append(f"pl.col({group_column!r}).cast(pl.String).alias('_group')")
+    selections.append("pl.col('_y')")
+    return [
+        f"    {variable} = {variable}.{grouping}.agg({expression})",
+        f"    {variable} = {variable}.select([{', '.join(selections)}])",
+    ]
+
+
+def _query_code(
+    index: int, source_variable: str, layer: dict[str, Any], schema: pl.Schema,
+    denominator_source_variable: str | None = None,
+) -> str:
     variable = f"layer_{index}"
     all_variable = f"{variable}_all"
     comment = str(layer["label"]).replace("\n", " ").replace("\r", " ")
@@ -150,6 +180,10 @@ def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema:
     x_column = layer["x_column"]
     y_column = layer["y_column"]
     group_column = layer["group_column"]
+    external_relative = (
+        layer["aggregation"] == "relative_value"
+        and layer["aggregation_options"].get("denominator_source")
+    )
     if layer["aggregation"] == "none":
         selections = []
         if x_column:
@@ -161,6 +195,44 @@ def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema:
         lines.append(f"    {variable} = {variable}.select([{', '.join(selections)}])")
         if x_column is None:
             lines.append(f"    {variable} = {variable}.with_row_index('_x', offset=1)")
+    elif external_relative:
+        options = layer["aggregation_options"]
+        inner_layer = {**layer, "aggregation": options["value_aggregation"]}
+        lines.extend(_relative_aggregate_code(
+            variable, layer, _aggregation_code(inner_layer) + ".alias('_y')",
+        ))
+        if layer["fill_missing_time_bins_with_zero"] and layer["time_bin"]:
+            lines.append(
+                f"    {variable} = _fill_missing_time_bins({variable}, {layer['time_bin']!r})"
+            )
+        denominator_variable = f"{variable}_denominator"
+        lines.append(f"    {denominator_variable} = {denominator_source_variable}")
+        denominator_layer = {
+            **inner_layer, "x_column": options["denominator_x_column"],
+            "y_column": options.get("denominator"),
+            "group_column": options["denominator_group_column"],
+        }
+        if x_column:
+            lines.append(
+                f"    {denominator_variable} = {denominator_variable}.with_columns("
+                f"pl.col({denominator_layer['x_column']!r}).cast(pl.{schema[x_column]!r}))"
+            )
+        lines.extend(_relative_aggregate_code(
+            denominator_variable, denominator_layer,
+            _aggregation_code(denominator_layer) + ".alias('_y')",
+        ))
+        lines.append(
+            f"    {denominator_variable} = {denominator_variable}.rename({{'_y': '_denominator'}})"
+        )
+        keys = ["_x", "_group"] if denominator_layer["group_column"] else ["_x"]
+        multiplier = 100.0 if options.get("scale") == "percent" else 1.0
+        lines.append(
+            f"    {variable} = {variable}.join({denominator_variable}, on={keys!r}, "
+            "how='left', nulls_equal=True).with_columns("
+            "pl.when(pl.col('_denominator') != 0).then("
+            f"pl.col('_y').cast(pl.Float64) / pl.col('_denominator') * {multiplier!r}"
+            ").otherwise(None).alias('_y')).drop('_denominator')"
+        )
     else:
         x_key = x_column
         groups = [column for column in (x_column, group_column) if column]
@@ -229,7 +301,7 @@ def _query_code(index: int, source_variable: str, layer: dict[str, Any], schema:
                 selections.append(f"pl.col({group_column!r}).cast(pl.String).alias('_group')")
             selections.append("pl.col('_y')")
             lines.append(f"    {variable} = {variable}.select([{', '.join(selections)}])")
-    if layer["fill_missing_time_bins_with_zero"] and layer["time_bin"]:
+    if layer["fill_missing_time_bins_with_zero"] and layer["time_bin"] and not external_relative:
         lines.append(
             f"    {variable} = _fill_missing_time_bins({variable}, {layer['time_bin']!r})"
         )
@@ -919,6 +991,10 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
         if (
             layer["plot_type"] not in BUILTIN_PLOTS
             or layer["aggregation"] not in BUILTIN_AGGREGATIONS
+            or (
+                layer["aggregation"] == "relative_value"
+                and layer["aggregation_options"]["value_aggregation"] not in BUILTIN_AGGREGATIONS
+            )
         ):
             raise ConfigurationError(
                 f"layer {layer['label']} uses a custom plugin and cannot be exported standalone"
@@ -934,6 +1010,10 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
     for layer in enabled_layers:
         if layer["source"] not in used_sources:
             used_sources.append(layer["source"])
+        if layer["aggregation"] == "relative_value":
+            denominator_source = layer["aggregation_options"]["denominator_source"]
+            if denominator_source and denominator_source not in used_sources:
+                used_sources.append(denominator_source)
     for name in used_sources:
         if name not in source_specs:
             raise ConfigurationError(f"configuration is missing source definition: {name}")
@@ -1028,7 +1108,14 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
     query_blocks = []
     for index, layer in enumerate(enabled_layers):
         schema = catalog.schema(layer["source"])
-        query_blocks.append(_query_code(index, source_variables[layer["source"]], layer, schema))
+        denominator_source = (
+            layer["aggregation_options"].get("denominator_source")
+            if layer["aggregation"] == "relative_value" else None
+        )
+        query_blocks.append(_query_code(
+            index, source_variables[layer["source"]], layer, schema,
+            source_variables.get(denominator_source),
+        ))
 
     figure = config["figure"]
     axes = config["axes"]

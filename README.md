@@ -294,6 +294,46 @@ percentage represented by `irregular_tcp_options` out of `total`, use
 `{"denominator":"total","scale":"percent"}`. A zero denominator produces a
 null value instead of infinity.
 
+For a denominator in another registered data source, select `relative_value`
+and use the **Denominator source**, **Denominator value column**, and
+**Denominator Time/X column** controls. **Aggregate both values with** chooses
+the same aggregation for the numerator and denominator (`sum` by default).
+Switching an existing timeline from e.g. `mean` or `count` to `relative_value`
+retains that aggregation. Both sources use the timeline's grouping method,
+**Every** interval, and **Week starts on** anchor. They are aggregated
+independently, then matched by the resulting X/time bins. **Relative scale**
+chooses fractions or percentages.
+
+For example, weekly percentages using a separate `totals` source:
+
+```json
+{
+  "aggregation": "relative_value",
+  "time_bin": "1w",
+  "time_bin_start_by": "thursday",
+  "aggregation_options": {
+    "denominator_source": "totals",
+    "denominator": "total",
+    "denominator_x_column": "timestamp",
+    "value_aggregation": "sum",
+    "scale": "percent"
+  }
+}
+```
+
+The denominator X column defaults to the numerator's X column name. For split
+series, leave **Denominator split column** empty to use the bin's total for
+every series, or select a column (`denominator_group_column` in JSON) to match
+series by their split values. Layer filters and **Input row limit** apply only
+to the numerator when a separate denominator source is selected; the denominator
+uses its own source filter and all its rows. Result filters, sorting, and result
+limits apply to the calculated ratios. Missing or zero denominators produce
+null values. **Fill missing time bins with 0** fills empty numerator bins before
+division, so they produce zero only when a valid, nonzero denominator exists.
+The setting is included in saved configurations and standalone Python exports,
+and changes to either source invalidate the cached result. Omitting
+`denominator_source` preserves the existing same-source behavior.
+
 ### Grouping and aggregation
 
 The layer editor exposes the query order explicitly:
@@ -320,7 +360,7 @@ built-in aggregation functions and their options:
 | `none` | No grouping or aggregation; raw X/Y rows | `{}` |
 | `count` | Counts rows in each group; Y is ignored | `{}` |
 | `relative_count` | Filtered row count divided by all rows in the same group; Y is ignored | `{}` for a 0–1 fraction, or `{"scale":"percent"}` for 0–100 |
-| `relative_value` | Sum of Y divided by the sum of another numeric column | `{"denominator":"total"}` for a 0–1 fraction, optionally with `"scale":"percent"` for 0–100 |
+| `relative_value` | Aggregate Y divided by the same aggregate of the denominator column or source | `{"denominator":"total"}` defaults to sums and a 0–1 fraction; optional `"denominator_source":"totals"`, `"value_aggregation":"mean"`, and `"scale":"percent"` |
 | `sum`, `min`, `max`, `mean`, `median`, `std`, `var` | Selected Y column | `{}` |
 | `first`, `last` | First or last Y value in each group | `{}` |
 | `n_unique` | Number of unique Y values in each group | `{}` |
