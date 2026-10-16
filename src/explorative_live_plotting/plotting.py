@@ -21,6 +21,7 @@ from matplotlib.patches import Patch
 import polars as pl
 
 from .errors import ConfigurationError
+from .panels import finish_plot_grid, normalize_plots, plot_config
 from .query import QueryEngine
 from .registry import PlotContext, Registry
 
@@ -179,6 +180,8 @@ def default_config(config_module: str | None = None) -> dict[str, Any]:
         "broken_y_axis": {"enabled": False, "gap": 0.1, "ranges": []},
         "stages": {"enabled": False, "overlay_alpha": 0.25, "steps": []},
         "layers": [],
+        "plots": [],
+        "layout": {"wspace": 0.3, "hspace": 0.5},
         "annotations": [],
         "export_formats": ["png", "pdf", "json"],
     }
@@ -832,6 +835,83 @@ def _validate_tick_locator(axes: dict[str, Any], prefix: str) -> None:
 def validate_config(raw: Any, registry: Registry) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ConfigurationError("configuration must be an object")
+    if "plots" in raw and not isinstance(raw["plots"], list):
+        raise ConfigurationError("plots must be an array")
+    if not raw.get("plots"):
+        return _validate_single_config(raw, registry)
+    for section in ("axes", "legend", "broken_y_axis", "stages", "figure", "layout"):
+        if section in raw and not isinstance(raw[section], dict):
+            raise ConfigurationError(f"{section} must be an object")
+    plots = normalize_plots(raw["plots"])
+    raw = deepcopy(raw)
+    raw["plots"] = plots
+    default_id = plots[0]["id"]
+    identifiers = {plot["id"] for plot in plots}
+    for section in ("layers", "annotations"):
+        if not isinstance(raw.get(section, []), list):
+            raise ConfigurationError(f"{section} must be an array")
+        for index, item in enumerate(raw.get(section, [])):
+            if not isinstance(item, dict):
+                raise ConfigurationError(f"each {section} entry must be an object")
+            item.setdefault("plot_id", default_id)
+            item.setdefault("id", f"{section[:-1]}-{index + 1}")
+            if section == "layers":
+                item.setdefault("label", item.get("y_column") or item["id"])
+            if item["plot_id"] not in identifiers:
+                raise ConfigurationError(f"unknown plot: {item['plot_id']}")
+    if not any(layer.get("enabled", True) for layer in raw.get("layers", [])):
+        raise ConfigurationError("at least one plot layer must be enabled")
+    seed = {**raw, "layers": [{"id": "empty", "plot_type": "line"}], "annotations": [],
+            "stages": {"enabled": False, "steps": []}, "broken_y_axis": {"enabled": False}}
+    config = _validate_single_config(seed, registry)
+    config["plots"] = plots
+    config["layers"], config["annotations"] = [], []
+    for plot in plots:
+        for section in ("axes", "legend", "broken_y_axis"):
+            if section in plot and not isinstance(plot[section], dict):
+                raise ConfigurationError(f"plot {section} must be an object")
+        panel = plot_config({**config, "layers": raw.get("layers", []),
+                             "annotations": raw.get("annotations", []),
+                             "broken_y_axis": {**default_config()["broken_y_axis"],
+                                               **raw.get("broken_y_axis", {})}}, plot)
+        empty = not any(layer.get("enabled", True) for layer in panel["layers"])
+        original_layers = panel["layers"]
+        if empty:
+            panel["layers"] = [{"id": "empty", "plot_type": "line"}, *original_layers]
+        validated = _validate_single_config(panel, registry)
+        for section in ("axes", "legend", "broken_y_axis"):
+            plot[section] = validated[section]
+        config["layers"].extend(validated["layers"][1:] if empty else validated["layers"])
+        config["annotations"].extend(validated["annotations"])
+    for dimension in ("x", "y"):
+        for plot in plots:
+            target = next((item for item in plots if item["id"] == plot[f"share_{dimension}"]), None)
+            if target and plot["axes"][f"{dimension}scale"] != target["axes"][f"{dimension}scale"]:
+                raise ConfigurationError(f"shared {dimension.upper()} axes require matching scales")
+            if target and dimension == "y" and (
+                plot["broken_y_axis"]["enabled"] or target["broken_y_axis"]["enabled"]
+            ):
+                raise ConfigurationError("sharing Y between plots with broken Y axes is unsupported")
+    element_ids = [item["id"] for item in config["layers"]]
+    annotation_ids = [item["id"] for item in config["annotations"]]
+    if len(element_ids) != len(set(element_ids)) or len(annotation_ids) != len(set(annotation_ids)):
+        raise ConfigurationError("layer and annotation IDs must be unique across plots")
+    config["stages"] = _validate_stages(raw.get("stages", {}), config)
+    config["layout"] = {**default_config()["layout"], **raw.get("layout", {})}
+    for field in ("wspace", "hspace"):
+        try:
+            value = float(config["layout"][field])
+        except (ValueError, TypeError) as error:
+            raise ConfigurationError("plot spacing must be a number between 0 and 5") from error
+        if not math.isfinite(value) or not 0 <= value <= 5:
+            raise ConfigurationError("plot spacing must be between 0 and 5")
+        config["layout"][field] = value
+    return config
+
+
+def _validate_single_config(raw: Any, registry: Registry) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ConfigurationError("configuration must be an object")
     raw, _ = migrate_legacy_config(raw)
     schema_version = raw.get("schema_version", 1)
     if schema_version not in {1, 2}:
@@ -1300,6 +1380,7 @@ def _validate_stages(raw: Any, config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigurationError("stage overlay alpha must be between 0 and 1")
     stages["overlay_alpha"] = alpha
     valid_ids = {
+        *(f"plot:{item['id']}" for item in config.get("plots", [])),
         *(f"layer:{item['id']}" for item in config["layers"]),
         *(f"annotation:{item['id']}" for item in config["annotations"]),
     }
@@ -1345,6 +1426,8 @@ def _default_stage_steps(config: dict[str, Any]) -> list[dict[str, Any]]:
             if item.get("enabled", True)
         ),
     ]
+    if len(config.get("plots", [])) > 1:
+        ordered = [f"plot:{plot['id']}" for plot in config["plots"]]
     steps = []
     for index, current in enumerate(ordered):
         elements = [
@@ -1468,6 +1551,42 @@ def build_figure(
     registry: Registry,
     stage_layout: dict[str, Any] | None = None,
 ):
+    if not config.get("plots"):
+        return _build_single_figure(config, engine, registry, stage_layout)
+    figure = config["figure"]
+    fig = plt.figure(figsize=(float(figure["width"]), float(figure["height"])), layout="constrained")
+    plots = config["plots"]
+    grid = fig.add_gridspec(
+        max(plot["row"] for plot in plots) + 1,
+        max(plot["column"] for plot in plots) + 1,
+        **config["layout"],
+    )
+    plot_axes, cache_states = {}, []
+    try:
+        for plot in plots:
+            before = len(fig.axes)
+            panel = plot_config(config, plot)
+            local_layout = stage_layout["plots"][plot["id"]] if stage_layout else None
+            _, states = _build_single_figure(
+                panel, engine, registry, local_layout,
+                figure_target=fig, subplot_spec=grid[plot["row"], plot["column"]],
+            )
+            axes = fig.axes[before:]
+            plot_axes[plot["id"]] = axes
+            axes[0].set_title(plot.get("title", ""))
+            cache_states.extend({**state, "plot": plot["id"]} for state in states)
+        finish_plot_grid(fig, plot_axes, plots, stage_layout)
+        fig._elp_plot_axes = plot_axes
+        return fig, cache_states
+    except Exception:
+        plt.close(fig)
+        raise
+
+
+def _build_single_figure(
+    config: dict[str, Any], engine: QueryEngine, registry: Registry,
+    stage_layout: dict[str, Any] | None = None, *, figure_target=None, subplot_spec=None,
+):
     figure = config["figure"]
     global_font_size = float(figure["font_size"])
     label_font_size = (
@@ -1486,7 +1605,20 @@ def build_figure(
         else global_font_size
     )
     broken_y = config["broken_y_axis"]
-    if broken_y["enabled"]:
+    if figure_target is not None:
+        fig = figure_target
+        if broken_y["enabled"]:
+            inner_grid = subplot_spec.subgridspec(len(broken_y["ranges"]), 1, hspace=broken_y["gap"])
+            primary_axes = []
+            for index in range(len(broken_y["ranges"])):
+                primary_axes.append(fig.add_subplot(
+                    inner_grid[index], sharex=primary_axes[0] if primary_axes else None
+                ))
+            primary = primary_axes[-1]
+        else:
+            primary = fig.add_subplot(subplot_spec)
+            primary_axes = [primary]
+    elif broken_y["enabled"]:
         fig, created_axes = plt.subplots(
             nrows=len(broken_y["ranges"]),
             sharex=True,
@@ -1665,7 +1797,7 @@ def build_figure(
     if secondary is not None:
         secondary.set_yscale(axes["secondary_yscale"])
     primary.set_xlabel(str(axes["xlabel"]).replace("\\n", "\n"), fontsize=label_font_size)
-    if broken_y["enabled"]:
+    if broken_y["enabled"] and figure_target is None:
         fig.supylabel(str(axes["ylabel"]).replace("\\n", "\n"), fontsize=label_font_size)
     else:
         primary.set_ylabel(str(axes["ylabel"]).replace("\\n", "\n"), fontsize=label_font_size)
@@ -1807,12 +1939,15 @@ def build_figure(
     if figure["font_family"] == "monospace":
         for text in fig.findobj(match=plt.Text):
             text.set_fontfamily("monospace")
-    if broken_y["enabled"]:
+    if figure_target is not None:
+        pass
+    elif broken_y["enabled"]:
         fig.subplots_adjust(hspace=float(broken_y["gap"]))
     else:
         fig.tight_layout()
     if (
         stage_layout is None
+        and figure_target is None
         and config["legend"]["enabled"]
         and config["legend"]["loc"] == "upper center"
         and config["legend"]["bbox_enabled"]
@@ -1834,8 +1969,9 @@ def build_figure(
                     transform=legend_axis.transAxes,
                 )
     if stage_layout is not None:
-        if len(fig.axes) == len(stage_layout["axes"]):
-            for axis, position in zip(fig.axes, stage_layout["axes"], strict=True):
+        local_axes = [*primary_axes, *([secondary] if secondary is not None else [])]
+        if len(local_axes) == len(stage_layout["axes"]):
+            for axis, position in zip(local_axes, stage_layout["axes"], strict=True):
                 axis.set_position(position)
         if config["legend"]["enabled"] and stage_layout["legend"] is not None:
             legend_axis = primary_axes[0] if broken_y["enabled"] else primary
@@ -2574,7 +2710,7 @@ def _stage_reference_layout(
                 / reference.bbox.width,
                 bounds.y0 / reference.bbox.height,
             )
-        return {
+        result = {
             "axes": [tuple(axis.get_position().bounds) for axis in reference.axes],
             "legend": legend_position,
             "legend_centered": centered_legend,
@@ -2582,6 +2718,26 @@ def _stage_reference_layout(
                 float(mpl.rcParams["savefig.pad_inches"])
             ),
         }
+        if config.get("plots"):
+            result["plots"] = {}
+            for plot in config["plots"]:
+                axes = reference._elp_plot_axes[plot["id"]]
+                panel_legend = next((axis.get_legend() for axis in axes if axis.get_legend()), None)
+                bounds = panel_legend.get_window_extent(renderer) if panel_legend else None
+                panel_centered = (
+                    plot["legend"]["loc"] == "upper center" and plot["legend"]["bbox_enabled"]
+                    and plot["legend"]["bbox_x"] == 0.5 and plot["legend"]["bbox_y"] == 1.2
+                )
+                result["plots"][plot["id"]] = {
+                    "axes": [tuple(axis.get_position().bounds) for axis in axes],
+                    "limits": [(axis.get_xlim(), axis.get_ylim()) for axis in axes],
+                    "legend": (
+                        ((bounds.x0 + bounds.width / 2 if panel_centered else bounds.x0) / reference.bbox.width,
+                         bounds.y0 / reference.bbox.height) if bounds is not None else None
+                    ),
+                    "legend_centered": panel_centered,
+                }
+        return result
     finally:
         plt.close(reference)
 
@@ -2631,6 +2787,49 @@ def _stage_configs(config: dict[str, Any]) -> list[tuple[str, str | None, dict[s
     stages = config["stages"]
     if not stages["enabled"]:
         return [("", None, config)]
+    if config.get("plots"):
+        expanded = deepcopy(config)
+        default_id = config["plots"][0]["id"]
+        for plot in config["plots"]:
+            color_index = 0
+            for layer in expanded["layers"]:
+                if layer.get("plot_id", default_id) == plot["id"] and layer.get("enabled", True):
+                    layer.setdefault("style", {}).setdefault("color", STD_COLORS[color_index % len(STD_COLORS)])
+                    color_index += 1
+        for step in expanded["stages"]["steps"]:
+            explicit = {element["id"]: element for element in step["elements"]}
+            for plot in config["plots"]:
+                selection = explicit.get(f"plot:{plot['id']}")
+                if selection is None:
+                    continue
+                for kind, section in (("layer", "layers"), ("annotation", "annotations")):
+                    for item in config[section]:
+                        identifier = f"{kind}:{item['id']}"
+                        if item.get("plot_id", default_id) == plot["id"] and identifier not in explicit:
+                            step["elements"].append({"id": identifier, "overlay": selection["overlay"]})
+        expanded["plots"] = []
+        stages_result = _stage_configs(expanded)
+        for index, (_, _, stage) in enumerate(stages_result):
+            stage["plots"] = deepcopy(config["plots"])
+            selected = {item["id"] for item in expanded["stages"]["steps"][index]["elements"]}
+            selections = {item["id"]: item for item in expanded["stages"]["steps"][index]["elements"]}
+            for annotation in stage["annotations"]:
+                if selections[f"annotation:{annotation['id']}"]["overlay"]:
+                    annotation["alpha"] = float(annotation.get("alpha", 0.6)) * float(stages["overlay_alpha"])
+            stage["_fixed_x_anchor_layers"] = {}
+            for plot in stage["plots"]:
+                plot["_visible"] = f"plot:{plot['id']}" in selected or any(
+                    f"{kind}:{item['id']}" in selected
+                    for kind, section in (("layer", "layers"), ("annotation", "annotations"))
+                    for item in config[section] if item.get("plot_id", default_id) == plot["id"]
+                )
+                anchor = next((layer for layer in config["layers"]
+                               if layer.get("plot_id", default_id) == plot["id"]
+                               and layer.get("enabled", True) and layer.get("fix_x_values", False)), None)
+                if anchor is not None:
+                    stage["_fixed_x_anchor_layers"][plot["id"]] = deepcopy(anchor)
+            stage.pop("_fixed_x_anchor_layer", None)
+        return stages_result
     result = []
     overlay_alpha = float(stages["overlay_alpha"])
     fixed_x_anchor = next(

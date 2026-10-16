@@ -53,6 +53,7 @@ let workspaces = [];
 let activeWorkspaceId = null;
 let workspaceNumber = 0;
 let workspaceSwitchSequence = 0;
+let activePlotId = null;
 
 const escapeHtml = value => String(value).replace(
   /[&<>"]/g,
@@ -707,6 +708,48 @@ function ensureConfig() {
     item.step_unit ??= 'd';
     item.rotation ??= 0;
   });
+  if (!config.plots?.length) config.plots = [{id: 'plot-1', label: 'Plot 1', row: 0, column: 0}];
+  config.layout ??= {wspace: 0.3, hspace: 0.5};
+  const defaultPlotId = config.plots[0].id;
+  for (const item of [...config.layers, ...config.annotations]) item.plot_id ??= defaultPlotId;
+  for (const [index, plot] of config.plots.entries()) {
+    plot.label ??= `Plot ${index + 1}`; plot.title ??= '';
+    plot.row ??= index; plot.column ??= 0;
+    plot.axes ??= structuredClone(config.axes);
+    plot.legend ??= structuredClone(config.legend);
+    plot.broken_y_axis ??= structuredClone(config.broken_y_axis);
+    plot.show_x_axis ??= true; plot.show_y_axis ??= true;
+  }
+  if (!config.plots.some(plot => plot.id === activePlotId)) activePlotId = defaultPlotId;
+}
+
+const activePlot = () => config.plots.find(plot => plot.id === activePlotId);
+
+function adoptPlotConfig(next) {
+  config = structuredClone(next); ensureConfig();
+  for (const section of ['axes', 'legend', 'broken_y_axis']) config[section] = structuredClone(activePlot()[section]);
+}
+
+function renderPlots() {
+  const plot = activePlot();
+  $('plot-count').textContent = `${config.plots.length} plot${config.plots.length === 1 ? '' : 's'}`;
+  $('active-plot').innerHTML = config.plots.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === activePlotId ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('');
+  $('plot-label').value = plot.label; $('plot-title').value = plot.title ?? '';
+  $('plot-row').value = plot.row + 1; $('plot-column').value = plot.column + 1;
+  const otherPlots = config.plots.filter(item => item.id !== activePlotId);
+  for (const dimension of ['x', 'y']) {
+    $(`plot-share-${dimension}`).innerHTML = '<option value="">Independent</option>' + otherPlots.map(item => `<option value="${escapeHtml(item.id)}" ${plot[`share_${dimension}`] === item.id ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('');
+    $(`plot-show-${dimension}`).checked = plot[`show_${dimension}_axis`] !== false;
+  }
+  $('plot-wspace').value = config.layout.wspace ?? 0.3;
+  $('plot-hspace').value = config.layout.hspace ?? 0.5;
+  $('remove-plot').disabled = config.plots.length === 1;
+}
+
+function switchPlot(identifier) {
+  const saved = collect();
+  activePlotId = identifier;
+  apply(saved);
 }
 
 function renderExpressionSymbols() {
@@ -717,7 +760,7 @@ function renderExpressionSymbols() {
 function newLayer() {
   const index = config.layers.length;
   return {
-    id: `layer-${Date.now()}-${index}`, enabled: true, label: `Layer ${index + 1}`,
+    id: `layer-${Date.now()}-${index}`, plot_id: activePlotId, enabled: true, label: `Layer ${index + 1}`,
     source: bootstrap.sources[0]?.name ?? '', plot_type: 'line', x_column: '',
     y_column: '', group_column: '', aggregation: 'none', aggregation_options: {},
     time_bin: null, time_bin_start_by: 'monday', break_on_missing_time_bin: false, fill_missing_time_bins_with_zero: false, filter_logic: 'and', required_filters: [], filters: [],
@@ -733,7 +776,7 @@ function newLayer() {
 function newAnnotation(kind = 'text') {
   const number = config.annotations.length + 1;
   return {
-    id: `annotation-${Date.now()}-${config.annotations.length}`, enabled: true, kind,
+    id: `annotation-${Date.now()}-${config.annotations.length}`, plot_id: activePlotId, enabled: true, kind,
     label: `Annotation ${number}`, text: kind === 'text' ? `Annotation ${number}` : '',
     show_in_legend: false, legend_label: `Annotation ${number}`,
     text_background_enabled: false, text_background_color: '#ffffff',
@@ -907,7 +950,7 @@ function renderSources() {
       });
       if (editingSourceName === item.name) clearSourceEditor();
       if (workspaceId !== activeWorkspaceId) return;
-      bootstrap = workspace.bootstrap; config = workspace.config;
+      bootstrap = workspace.bootstrap; adoptPlotConfig(workspace.config);
       reconcileStages(); renderSources(); renderLayers(); renderStages(); changed(true);
     };
     $('sources').appendChild(div);
@@ -1060,6 +1103,7 @@ function renderLayers() {
   root.innerHTML = '';
   $('layer-count').textContent = `${config.layers.length} configured`;
   config.layers.forEach((layer, index) => {
+    if (layer.plot_id !== activePlotId) return;
     layer.style ??= {}; layer.filters ??= []; layer.required_filters ??= [];
     layer.base_filter_expression ??= ''; layer.filter_expression ??= '';
     layer.aggregation_options ??= {}; layer.options ??= {};
@@ -1228,7 +1272,7 @@ function renderLayers() {
     q('.stacked').onchange = event => { layer.stacked = event.target.checked; changed(false); };
     q('.secondary').onchange = event => { layer.secondary_y = event.target.checked; changed(false); };
     q('.fix-x-values').onchange = event => {
-      config.layers.forEach(item => { item.fix_x_values = item === layer && event.target.checked; });
+      config.layers.filter(item => item.plot_id === activePlotId).forEach(item => { item.fix_x_values = item === layer && event.target.checked; });
       renderLayers(); changed(true);
     };
     q('.aggregation-options').onchange = event => {
@@ -1276,10 +1320,11 @@ function renderAnnotations() {
   const root = $('annotation-editors'); root.innerHTML = '';
   $('annotation-count').textContent = `${config.annotations.length} configured`;
   config.annotations.forEach((item, index) => {
+    if (item.plot_id !== activePlotId) return;
     const card = document.createElement('div'); card.className = 'annotation';
     const coordinateFields = annotationCoordinates(item.kind).map(field => coordinateEditor(item, field)).join('');
     const selectedLayers = new Set(item.inference?.layer_ids ?? []);
-    const layerOptions = config.layers.map(layer => `<option value="${escapeHtml(layer.id)}" ${selectedLayers.has(layer.id) ? 'selected' : ''}>${escapeHtml(layer.label || layer.id)}</option>`).join('');
+    const layerOptions = config.layers.filter(layer => layer.plot_id === activePlotId).map(layer => `<option value="${escapeHtml(layer.id)}" ${selectedLayers.has(layer.id) ? 'selected' : ''}>${escapeHtml(layer.label || layer.id)}</option>`).join('');
     const hasX = ['text', 'vline'].includes(item.kind); const hasY = ['text', 'hline'].includes(item.kind);
     card.innerHTML = `<div class="annotation-head"><input class="enabled" type="checkbox" ${item.enabled !== false ? 'checked' : ''}><label>ID<input class="annotation-id" value="${escapeHtml(item.id)}"></label><label>Annotation label<input class="annotation-label" value="${escapeHtml(item.label ?? '')}"></label><button class="duplicate" type="button">Duplicate</button><button class="remove">×</button></div><div class="grid"><label>Kind<select class="kind">${option(['text', 'vline', 'hline', 'vspan', 'hspan'], item.kind)}</select></label><label>Displayed text<input class="text" value="${escapeHtml(item.text ?? '')}" placeholder="Text drawn on the plot"></label>${coordinateFields}${hasX ? `<label>Infer X<select class="infer-x">${inferenceOptions('x', item.inference?.x ?? 'manual')}</select></label>` : ''}${hasY ? `<label>Infer Y<select class="infer-y">${inferenceOptions('y', item.inference?.y ?? 'manual')}</select></label>` : ''}<label>Inference layers<select class="inference-layers" multiple size="${Math.min(4, Math.max(2, config.layers.length))}">${layerOptions}</select><small>Ctrl/Cmd-click to select multiple layers.</small></label><label><span>Nudge step ${info('Numeric coordinates move by this amount. ISO date/time coordinates use the selected time unit.')}</span><span class="nudge-step"><input class="step" type="number" min="0" step="any" value="${escapeHtml(item.step ?? 1)}"><select class="step-unit">${ANNOTATION_NUDGE_UNITS.map(([value, label]) => `<option value="${value}" ${value === (item.step_unit ?? 'd') ? 'selected' : ''}>${label}</option>`).join('')}</select></span></label><label>Font size<span class="coordinate"><button type="button" class="font-down">−</button><input class="fontsize" type="number" min="1" value="${item.fontsize ?? 10}"><button type="button" class="font-up">+</button></span></label>${item.kind === 'text' ? `<label>Text rotation [°]<input class="rotation" type="number" step="any" value="${escapeHtml(item.rotation ?? 0)}"></label>` : ''}<label>Color<input class="color" type="color" value="${item.color ?? '#666666'}"></label><label><span><input class="text-background-enabled" type="checkbox" ${item.text_background_enabled ? 'checked' : ''}> Text background</span><input class="text-background-color" type="color" value="${item.text_background_color ?? '#ffffff'}"></label><label>Opacity<input class="alpha" type="number" min="0" max="1" step="0.05" value="${item.alpha ?? 0.6}"></label><label>Line style<select class="linestyle">${option(['-', '--', '-.', ':'], item.linestyle ?? '--')}</select></label><label class="legend-annotation"><span><input class="show-in-legend" type="checkbox" ${item.show_in_legend ? 'checked' : ''}> Add to legend</span><input class="legend-label" value="${escapeHtml(item.legend_label ?? '')}" placeholder="Legend label"></label></div>`;
     const q = selector => card.querySelector(selector);
@@ -1344,6 +1389,7 @@ function renderAnnotations() {
 
 function stageElements() {
   return [
+    ...config.plots.map(item => ({id: `plot:${item.id}`, label: `Plot: ${item.label}`, layer: true})),
     ...config.layers.map(item => ({id: `layer:${item.id}`, label: `Layer: ${item.label}`, layer: true})),
     ...config.annotations.map(item => ({id: `annotation:${item.id}`, label: `Annotation: ${item.label || item.id}`, layer: false})),
   ];
@@ -1357,6 +1403,7 @@ function generateDefaultStages(render = true) {
     ...config.layers.filter(item => item.enabled !== false).map(item => `layer:${item.id}`),
     ...config.annotations.filter(item => item.enabled !== false).map(item => `annotation:${item.id}`),
   ];
+  if (config.plots.length > 1) ordered.splice(0, ordered.length, ...config.plots.map(item => `plot:${item.id}`));
   config.stages.enabled = true;
   config.stages.steps = ordered.map((current, index) => ({
     id: `stage-${Date.now()}-${index}`, label: `Stage ${index + 1}`,
@@ -1466,6 +1513,11 @@ function collect() {
   result.stages.enabled = $('stages-enabled').checked;
   result.stages.overlay_alpha = Number($('overlay-alpha').value);
   result.export_formats = ['png', 'pdf', 'json'].filter(x => $(x).checked);
+  const plot = result.plots.find(item => item.id === activePlotId);
+  for (const section of ['axes', 'legend', 'broken_y_axis']) {
+    plot[section] = structuredClone(result[section]);
+    result[section] = structuredClone(result.plots[0][section]);
+  }
   return result;
 }
 
@@ -1489,7 +1541,7 @@ function updateDatetimeTickState() {
 }
 function apply(next) {
   queryRevision += 1; queryDirty = true;
-  config = structuredClone(next); ensureConfig();
+  adoptPlotConfig(next);
   $('config-module').value = config.config_module ?? bootstrap.config_module ?? '';
   $('output-dir').value = config.output_dir ?? bootstrap.output_dir ?? 'plots';
   renderOutputPathSuggestions([]); $('output-dir-resolved').textContent = '';
@@ -1549,7 +1601,7 @@ function apply(next) {
   $('stages-enabled').checked = config.stages.enabled ?? false; $('overlay-alpha').value = config.stages.overlay_alpha ?? 0.25;
   for (const format of ['png', 'pdf', 'json']) $(format).checked = (config.export_formats ?? []).includes(format);
   renderBrokenYRanges(); renderTickLocatorEditors(); updateBrokenYAxisState(); updateXValueTickState();
-  updateFontControlState(); updateLegendBboxState(); renderLayers(); renderAnnotations(); renderStages();
+  updateFontControlState(); updateLegendBboxState(); renderPlots(); renderLayers(); renderAnnotations(); renderStages();
 }
 
 function changed(queryChanged = true) {
@@ -1590,7 +1642,7 @@ async function applyConfigModule(showMessage = true) {
   workspace.bootstrap.expression_variables = result.expression_variables ?? [];
   workspace.config.config_module = result.config_module; workspace.queryDirty = true;
   if (workspaceId !== activeWorkspaceId) return false;
-  bootstrap = workspace.bootstrap; config = workspace.config; renderExpressionSymbols();
+  bootstrap = workspace.bootstrap; adoptPlotConfig(workspace.config); renderExpressionSymbols();
   queryRevision += 1; queryDirty = true; clearTimeout(liveTimer);
   renderSources(); renderLayers(); schedulePathSuggestions(); scheduleOutputPathSuggestions();
   if (showMessage) message(`Config module applied: ${result.config_module ?? '(none)'}.`);
@@ -1733,10 +1785,70 @@ $('add-source').onclick = async () => {
   workspace.queryDirty = true;
   if (workspaceId !== activeWorkspaceId) return;
   bootstrap = workspace.bootstrap;
-  config = workspace.config; clearSourceEditor();
+  adoptPlotConfig(workspace.config); clearSourceEditor();
   renderSources(); renderLayers(); message(previousName ? 'Source updated.' : 'Lazy source registered.');
 };
 $('add-layer').onclick = () => { config.layers.push(newLayer()); renderLayers(); renderStages(); changed(true); };
+$('active-plot').onchange = event => switchPlot(event.target.value);
+$('add-plot').onclick = () => {
+  const saved = collect();
+  config = saved;
+  const current = activePlot();
+  const oldRows = Math.max(...config.plots.map(plot => plot.row)) + 1;
+  const oldColumns = Math.max(...config.plots.map(plot => plot.column)) + 1;
+  const direction = $('new-plot-direction').value;
+  const dimension = ['left', 'right'].includes(direction) ? 'column' : 'row';
+  const position = current[dimension] + (['right', 'below'].includes(direction) ? 1 : 0);
+  for (const plot of config.plots) if (plot[dimension] >= position) plot[dimension] += 1;
+  const newPlot = {
+    id: `plot-${Date.now()}`, label: `Plot ${config.plots.length + 1}`, title: '',
+    row: current.row, column: current.column, show_x_axis: true, show_y_axis: true,
+    axes: structuredClone(current.axes), legend: structuredClone(current.legend),
+    broken_y_axis: structuredClone(current.broken_y_axis),
+  };
+  newPlot[dimension] = position;
+  config.plots.push(newPlot); activePlotId = newPlot.id;
+  config.figure.height *= (Math.max(...config.plots.map(plot => plot.row)) + 1) / oldRows;
+  config.figure.width *= (Math.max(...config.plots.map(plot => plot.column)) + 1) / oldColumns;
+  config.layers.push(newLayer());
+  apply(config); changed(true);
+};
+$('remove-plot').onclick = () => {
+  if (config.plots.length === 1) return;
+  const saved = collect();
+  const oldRows = Math.max(...saved.plots.map(plot => plot.row)) + 1;
+  const oldColumns = Math.max(...saved.plots.map(plot => plot.column)) + 1;
+  saved.plots = saved.plots.filter(plot => plot.id !== activePlotId);
+  saved.layers = saved.layers.filter(layer => layer.plot_id !== activePlotId);
+  saved.annotations = saved.annotations.filter(item => item.plot_id !== activePlotId);
+  for (const plot of saved.plots) for (const field of ['share_x', 'share_y']) if (plot[field] === activePlotId) plot[field] = null;
+  // Compact empty rows and columns after removal without changing relative positions.
+  for (const field of ['row', 'column']) {
+    const values = [...new Set(saved.plots.map(plot => plot[field]))].sort((a, b) => a - b);
+    saved.plots.forEach(plot => { plot[field] = values.indexOf(plot[field]); });
+  }
+  saved.figure.height *= (Math.max(...saved.plots.map(plot => plot.row)) + 1) / oldRows;
+  saved.figure.width *= (Math.max(...saved.plots.map(plot => plot.column)) + 1) / oldColumns;
+  activePlotId = saved.plots[0].id; apply(saved); reconcileStages(); renderStages(); changed(true);
+};
+for (const [id, field] of [['plot-label', 'label'], ['plot-title', 'title']]) $(id).oninput = event => {
+  activePlot()[field] = event.target.value;
+  if (field === 'label') { renderStages(); renderPlots(); }
+  changed(false);
+};
+for (const field of ['row', 'column']) $(`plot-${field}`).onchange = event => {
+  const position = Number(event.target.value) - 1;
+  if (!Number.isInteger(position) || position < 0 || position > 49) { renderPlots(); return message('Grid positions must be between 1 and 50.', true); }
+  const plot = activePlot();
+  const collision = config.plots.find(item => item.id !== plot.id && item[field] === position && item[field === 'row' ? 'column' : 'row'] === plot[field === 'row' ? 'column' : 'row']);
+  if (collision) collision[field] = plot[field];
+  plot[field] = position; renderPlots(); changed(false);
+};
+for (const dimension of ['x', 'y']) {
+  $(`plot-share-${dimension}`).onchange = event => { activePlot()[`share_${dimension}`] = event.target.value || null; changed(false); };
+  $(`plot-show-${dimension}`).onchange = event => { activePlot()[`show_${dimension}_axis`] = event.target.checked; changed(false); };
+}
+for (const field of ['wspace', 'hspace']) $(`plot-${field}`).oninput = event => { config.layout[field] = Number(event.target.value); changed(false); };
 $('add-annotation').onclick = () => { config.annotations.push(newAnnotation()); renderAnnotations(); renderStages(); changed(false); };
 $('annotations').onchange = event => {
   try { config.annotations = JSON.parse(event.target.value); ensureConfig(); reconcileStages(); renderAnnotations(); renderStages(); changed(false); }

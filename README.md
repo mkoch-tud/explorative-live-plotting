@@ -201,6 +201,47 @@ a **Duplicate** action that copies their query, filters, and styling. **Save
 all** renders and saves every open workspace to its own configured output
 directory.
 
+## Multiple plots in one figure
+
+Use **Plots & layout → Add plot** to add another graph to the same figure.
+The default position is below the selected plot; **Place new plot** also offers
+above, left, and right. Adding a row or column grows the figure to retain the
+existing plot size. You can adjust the overall figure width and height afterward.
+**Grid row** and **Grid column** allow arbitrary grid arrangements; moving onto
+an occupied cell swaps the two plots. Removing a plot also removes its layers
+and annotations and compacts empty rows and columns.
+
+**Edit plot** selects the graph whose layers, axis settings, legend, broken Y
+axis, and annotations appear in the editor. Each plot has its own name and
+optional displayed title. Sources, figure size, export settings, and stages
+belong to the whole figure.
+
+Use **Share X with** or **Share Y with** to link plots' scales and limits.
+Shared plots must use the same axis scale. **Show X axis** and **Show Y axis**
+independently control the ticks, labels, and spines on each plot; hiding an axis
+does not disconnect it from its shared group. **Horizontal spacing** and
+**Vertical spacing** set the gaps as fractions of the subplot dimensions.
+Sharing Y with a plot that has a broken Y axis is rejected.
+
+Configurations store plots in a `plots` array, and layers and annotations use
+`plot_id` to select their graph. Existing configurations without `plots` keep
+their single-plot behavior. Grid positions are zero-based in JSON:
+
+```json
+{
+  "plots": [
+    {"id": "top", "label": "Overview", "row": 0, "column": 0,
+     "show_x_axis": false, "axes": {"ylabel": "Count"}},
+    {"id": "bottom", "label": "Detail", "row": 1, "column": 0,
+     "share_x": "top", "axes": {"xlabel": "Week", "ylabel": "Percentage"}}
+  ],
+  "layout": {"wspace": 0.3, "hspace": 0.5}
+}
+```
+
+PNG/PDF previews, save/download, JSON configurations, and standalone Python
+exports preserve the grid layout and axis-sharing settings.
+
 ## Query and plot model
 
 Each plot is composed of independent layers. A layer selects:
@@ -276,8 +317,8 @@ violin, stem, and hexbin. Layers can be mixed freely on primary and secondary
 axes.
 
 `relative_count` divides the number of rows matching the layer's filters by all
-rows in the same time/group bin. It returns a fraction from 0 to 1 by default;
-use `{"scale":"percent"}` as the aggregation options for 0 to 100. For example,
+rows in the same time/group bin. It returns a fraction by default;
+use `{"scale":"percent"}` as the aggregation options for percentages. For example,
 to inspect high-TTL SYN packets by minute:
 
 - total series: X `timestamp`, grouping `group_by_dynamic`, Every `1m`,
@@ -285,6 +326,35 @@ to inspect high-TTL SYN packets by minute:
 - high-TTL series: the same settings plus filter `ttl gt 200`;
 - relative series: the same grouping with aggregation `relative_count`, filter
   `ttl gt 200`, and optionally percent scale.
+
+`relative_count` also supports a separate **Denominator source**. Select its
+**Denominator Time/X column** to count that source's rows in the same time bins,
+using the timeline's **Every** interval and **Week starts on** anchor. Neither
+source needs a Y/value or total column: the ratio is the numerator's filtered
+row count divided by the denominator source's row count for that bin. For example:
+
+```json
+{
+  "aggregation": "relative_count",
+  "time_bin": "1w",
+  "aggregation_options": {
+    "denominator_source": "all_packets",
+    "denominator_x_column": "timestamp",
+    "scale": "percent"
+  }
+}
+```
+
+The denominator X column defaults to the numerator's X column name. Leave
+**Denominator split column** empty to use the bin's total row count for each
+numerator series, or select a column to match counts by split values.
+The external denominator uses its own source filter; numerator layer filters,
+base filters, and input-row limits do not apply to that source. Bins present in
+the numerator's base rows remain visible with zero when its layer filters
+select no rows. **Fill missing time bins with 0** also inserts empty numerator
+bins between those dates. Missing denominator bins produce null ratios.
+Saved configurations, query caching, and standalone Python exports include
+the denominator source. Choosing **Same source** keeps the existing behavior.
 
 `relative_value` is intended for data that already contains aggregated count
 columns. It divides the sum of the selected Y column by the sum of another
@@ -359,7 +429,7 @@ built-in aggregation functions and their options:
 | --- | --- | --- |
 | `none` | No grouping or aggregation; raw X/Y rows | `{}` |
 | `count` | Counts rows in each group; Y is ignored | `{}` |
-| `relative_count` | Filtered row count divided by all rows in the same group; Y is ignored | `{}` for a 0–1 fraction, or `{"scale":"percent"}` for 0–100 |
+| `relative_count` | Filtered row count divided by the row count in the same time/group bin; Y is ignored | `{}` for a fraction, `{"scale":"percent"}` for percentages, optionally `"denominator_source":"all_packets"` and `"denominator_x_column":"timestamp"` |
 | `relative_value` | Aggregate Y divided by the same aggregate of the denominator column or source | `{"denominator":"total"}` defaults to sums and a 0–1 fraction; optional `"denominator_source":"totals"`, `"value_aggregation":"mean"`, and `"scale":"percent"` |
 | `sum`, `min`, `max`, `mean`, `median`, `std`, `var` | Selected Y column | `{}` |
 | `first`, `last` | First or last Y value in each group | `{}` |
@@ -416,7 +486,7 @@ one unbounded JSON response. Selecting an entry copies its exact ISO value into
 the equality filter. Like **Query 5 values**, this picker reads the source
 column before layer filters or the input-row limit.
 
-The exception to normal filter order is the denominator of `relative_count`,
+The exception to normal filter order is the same-source denominator of `relative_count`,
 which intentionally counts all input rows in the same bin before the layer
 filters are applied. Plugin aggregations receive the entire aggregation-options
 object.
@@ -580,6 +650,15 @@ Presentation fields are excluded from query-cache keys, so restyling a rendered
 layer reuses its collected frame rather than recalculating it.
 
 ## Staged plots
+
+For figures containing multiple plots, **Generate cumulative stages** reveals
+one whole plot at a time. Each stage's element list includes **Plot**, **Layer**,
+and **Annotation** entries, so stages can mix whole graphs with individual
+elements. Including a plot includes all of its layers and annotations; an
+explicit layer entry can override its overlay setting. Plot overlays fade the
+included lines and annotations. Unrevealed plots leave their grid cells empty.
+Positions, shared-axis limits, colors, legends, and exported image dimensions
+remain fixed throughout the sequence.
 
 Enable **Create staged plots** to render multiple plot files/previews from one
 configuration. **Generate cumulative stages** creates the default sequence:

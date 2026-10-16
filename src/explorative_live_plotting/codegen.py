@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import math
+import inspect
+import textwrap
 from pprint import pformat
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -12,6 +14,7 @@ import polars as pl
 
 from .data import MODULE_NAME, PATH_VARIABLE, DataCatalog, normalize_reader_options
 from .errors import ConfigurationError
+from .panels import finish_plot_grid, plot_config
 from .expressions import expression_names
 from .query import validate_layer
 from .registry import BUILTIN_AGGREGATIONS, BUILTIN_PLOTS, Registry
@@ -974,8 +977,62 @@ def _broken_axis_marks(axes):
 '''.strip()
 
 
+def _generate_grid_script(config: dict[str, Any], catalog: DataCatalog, registry: Registry) -> str:
+    if config["stages"]["enabled"]:
+        raise ConfigurationError(
+            "standalone code export does not yet support stages; use Download to export all stages"
+        )
+    sections = [
+        (
+            "from __future__ import annotations\nimport matplotlib as mpl\n"
+            "mpl.use('Agg')\nimport matplotlib.pyplot as plt"
+        ),
+        "CONFIG = " + pformat(config, sort_dicts=False, width=100),
+        inspect.getsource(finish_plot_grid),
+    ]
+    for index, plot in enumerate(config["plots"]):
+        script = generate_script(plot_config(config, plot), catalog, registry)
+        script = script.replace("from __future__ import annotations\n", "", 1)
+        script = script.rsplit("\nif __name__ == '__main__':", 1)[0]
+        sections.append(
+            f"def _render_plot_{index}(figure_target, subplot_spec):\n"
+            + textwrap.indent(script, "    ")
+            + "\n    return main(figure_target, subplot_spec)\n"
+        )
+    plots, figure = config["plots"], config["figure"]
+    lines = [
+        "def main():",
+        f"    fig = plt.figure(figsize=({figure['width']!r}, {figure['height']!r}), layout='constrained')",
+        (
+            f"    grid = fig.add_gridspec({max(plot['row'] for plot in plots) + 1}, "
+            f"{max(plot['column'] for plot in plots) + 1}, **CONFIG['layout'])"
+        ),
+        "    plot_axes = {}", "    try:",
+    ]
+    for index, plot in enumerate(plots):
+        lines.extend([
+            f"        _, axes = _render_plot_{index}(fig, grid[{plot['row']}, {plot['column']}])",
+            f"        axes[0].set_title({plot.get('title', '')!r})",
+            f"        plot_axes[{plot['id']!r}] = axes",
+        ])
+    lines.append("        finish_plot_grid(fig, plot_axes, CONFIG['plots'])")
+    for output_format in config["export_formats"]:
+        if output_format in {"png", "pdf"}:
+            lines.append(
+                f"        fig.savefig({config['filename'] + '.' + output_format!r}, "
+                f"format={output_format!r}, dpi={int(figure['dpi'])!r}, bbox_inches='tight')"
+            )
+    lines.extend(["    finally:", "        plt.close(fig)", "", "if __name__ == '__main__':", "    main()"])
+    sections.append("\n".join(lines))
+    script = "\n\n".join(sections) + "\n"
+    compile(script, f"{config['filename']}.py", "exec")
+    return script
+
+
 def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Registry) -> str:
     """Return a standalone script for a validated built-in plot configuration."""
+    if config.get("plots"):
+        return _generate_grid_script(config, catalog, registry)
     plot_formats = [item for item in config["export_formats"] if item in {"png", "pdf"}]
     if not plot_formats:
         raise ConfigurationError("select PNG and/or PDF before exporting code")
@@ -1203,8 +1260,24 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
             f"({float(figure['width'])!r}, {float(figure['height'])!r}))",
             "    primary_axes = [primary]",
         ]
+    external_figure_lines = [
+        "    else:", "        fig = figure_target",
+    ]
+    if broken_y["enabled"]:
+        external_figure_lines.extend([
+            f"        inner_grid = subplot_spec.subgridspec({len(broken_y['ranges'])}, 1, hspace={broken_y['gap']!r})",
+            "        primary_axes = []",
+            f"        for index in range({len(broken_y['ranges'])}):",
+            "            primary_axes.append(fig.add_subplot(inner_grid[index], sharex=primary_axes[0] if primary_axes else None))",
+            "        primary = primary_axes[-1]",
+        ])
+    else:
+        external_figure_lines.extend([
+            "        primary = fig.add_subplot(subplot_spec)", "        primary_axes = [primary]",
+        ])
+    figure_lines = ["    if figure_target is None:", *["    " + line for line in figure_lines], *external_figure_lines]
     main_lines = [
-        "def main():",
+        "def main(figure_target=None, subplot_spec=None):",
         *source_lines,
         "",
         *[line for block in query_blocks for line in (block, "")],
@@ -1239,7 +1312,7 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
             "    primary.set_xlabel(str(axes['xlabel']).replace('\\\\n', '\\n'), "
             f"fontsize={label_font_size!r})",
             (
-                "    fig.supylabel(str(axes['ylabel']).replace('\\\\n', '\\n'), "
+                    "    (fig.supylabel if figure_target is None else primary.set_ylabel)(str(axes['ylabel']).replace('\\\\n', '\\n'), "
                 f"fontsize={label_font_size!r})"
                 if broken_y["enabled"]
                 else "    primary.set_ylabel(str(axes['ylabel']).replace('\\\\n', '\\n'), "
@@ -1334,6 +1407,10 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
                 "        text.set_fontfamily('monospace')",
             ]
         )
+    main_lines.extend([
+        "    if figure_target is not None:",
+        "        return fig, [*primary_axes, *([secondary] if secondary is not None else [])]",
+    ])
     main_lines.append(
         f"    fig.subplots_adjust(hspace={float(broken_y['gap'])!r})"
         if broken_y["enabled"]
