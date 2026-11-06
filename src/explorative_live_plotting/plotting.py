@@ -21,6 +21,7 @@ from matplotlib.patches import Patch
 import polars as pl
 
 from .errors import ConfigurationError
+from .labels import set_plot_ylabel
 from .panels import finish_plot_grid, normalize_plots, plot_config
 from .query import QueryEngine
 from .registry import PlotContext, Registry
@@ -1797,10 +1798,9 @@ def _build_single_figure(
     if secondary is not None:
         secondary.set_yscale(axes["secondary_yscale"])
     primary.set_xlabel(str(axes["xlabel"]).replace("\\n", "\n"), fontsize=label_font_size)
-    if broken_y["enabled"] and figure_target is None:
-        fig.supylabel(str(axes["ylabel"]).replace("\\n", "\n"), fontsize=label_font_size)
-    else:
-        primary.set_ylabel(str(axes["ylabel"]).replace("\\n", "\n"), fontsize=label_font_size)
+    set_plot_ylabel(
+        fig, primary_axes, str(axes["ylabel"]).replace("\\n", "\n"), label_font_size
+    )
     if secondary is not None:
         secondary.set_ylabel(
             str(axes["secondary_ylabel"]).replace("\\n", "\n"), fontsize=label_font_size

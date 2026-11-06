@@ -14,6 +14,7 @@ import polars as pl
 
 from .data import MODULE_NAME, PATH_VARIABLE, DataCatalog, normalize_reader_options
 from .errors import ConfigurationError
+from .labels import PlotYAxisLayout, PlotYLabelTransform, set_plot_ylabel
 from .panels import finish_plot_grid, plot_config
 from .expressions import expression_names
 from .query import validate_layer
@@ -1138,6 +1139,7 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
         "import matplotlib.pyplot as plt",
         "import matplotlib.dates as mdates",
         "import matplotlib.ticker as mticker",
+        "import matplotlib.transforms as mtransforms",
         "import polars as pl",
     ]
     if variables:
@@ -1312,11 +1314,8 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
             "    primary.set_xlabel(str(axes['xlabel']).replace('\\\\n', '\\n'), "
             f"fontsize={label_font_size!r})",
             (
-                    "    (fig.supylabel if figure_target is None else primary.set_ylabel)(str(axes['ylabel']).replace('\\\\n', '\\n'), "
-                f"fontsize={label_font_size!r})"
-                if broken_y["enabled"]
-                else "    primary.set_ylabel(str(axes['ylabel']).replace('\\\\n', '\\n'), "
-                f"fontsize={label_font_size!r})"
+                "    set_plot_ylabel(fig, primary_axes, "
+                f"str(axes['ylabel']).replace('\\\\n', '\\n'), {label_font_size!r})"
             ),
             "    if secondary is not None:",
             "        secondary.set_ylabel(str(axes['secondary_ylabel']).replace('\\\\n', "
@@ -1466,6 +1465,9 @@ def generate_script(config: dict[str, Any], catalog: DataCatalog, registry: Regi
         "\n".join(imports),
         "# Complete Explorative Live Plotting configuration.\n" + embedded_config,
         HELPERS,
+        inspect.getsource(PlotYLabelTransform),
+        inspect.getsource(PlotYAxisLayout),
+        inspect.getsource(set_plot_ylabel),
         "\n\n".join(draw_functions),
         "\n".join(main_lines),
     ]
